@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>IoT Single Sensor Dashboard</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+
+    <script>
+        const pageMode = "single";
+    </script>
+
+    <script src="/static/js/dashboard_common.js" defer></script>
+</head>
+
+<body>
+<div class="layout">
+
+    <aside class="sidebar">
+        <div id="commonMenu"></div>
+
+        <div class="info-box">
+            <h3>시스템 상태</h3>
+
+            <div class="info-item">
+                <span class="info-label">MQTT Broker</span><br>
+                <span id="brokerInfo">-</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Topic Prefix</span><br>
+                <span id="topicPrefix">-</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Sensor Count</span><br>
+                <span id="sensorCount">0</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Dashboard Status</span><br>
+                <span class="status-ok">RUNNING</span>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <h3>표시 설정</h3>
+
+            <div class="control-panel">
+                <label>
+                    센서 선택
+                    <select id="sensorSelect"></select>
+                </label>
+
+                <label>
+                    최근 데이터
+                    <select id="dataLimit">
+                        <option value="30">30개</option>
+                        <option value="50" selected>50개</option>
+                        <option value="100">100개</option>
+                        <option value="200">200개</option>
+                    </select>
+                </label>
+
+                <label>
+                    시간 표시 간격
+                    <select id="tickInterval">
+                        <option value="1">1개마다</option>
+                        <option value="5" selected>5개마다</option>
+                        <option value="10">10개마다</option>
+                    </select>
+                </label>
+
+                <label>
+                    자동 갱신
+                    <select id="refreshInterval">
+                        <option value="1000">1초</option>
+                        <option value="3000" selected>3초</option>
+                        <option value="5000">5초</option>
+                        <option value="10000">10초</option>
+                    </select>
+                </label>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <h3>센서 목록</h3>
+            <div id="sensorList">-</div>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>Single Sensor Dashboard</h2>
+            <div>선택한 센서 1개의 실시간 데이터를 표시합니다.</div>
+        </div>
+
+        <div class="single-chart-panel">
+            <canvas id="sensorChart"></canvas>
+        </div>
+    </main>
+
+</div>
+</body>
+</html>

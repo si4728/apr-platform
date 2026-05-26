@@ -1,0 +1,15 @@
+services:
+  apr-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu
+    image: apr-gateway:ubuntu
+    container_name: apr-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MODEL_DIR: /app/models
+      HTTP_PORT: 8080
+    ports:
+      - "8080:8080"

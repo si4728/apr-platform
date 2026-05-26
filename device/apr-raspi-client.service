@@ -1,0 +1,14 @@
+[Unit]
+Description=APR Raspberry Pi MQTT Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/raspi_client
+ExecStart=/home/pi/raspi_client/.venv/bin/python /home/pi/raspi_client/raspi_iot_publisher.py --config /home/pi/raspi_client/client.config
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

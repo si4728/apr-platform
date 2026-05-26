@@ -1,0 +1,7 @@
+{
+  "format": "sklearn_preprocessor_plus_xgboost_save_model",
+  "source_pipeline": "xgb_model.joblib",
+  "base_meta": "xgb_model_meta.json",
+  "preprocessor": "xgb_preprocessor.joblib",
+  "xgboost_model": "xgb_model.json"
+}

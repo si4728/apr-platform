@@ -1,0 +1,111 @@
+{
+    "mqtt": {
+        "broker": "218.146.225.166",
+        "port": 1883,
+        "brokers": [
+            {
+                "name": "primary",
+                "host": "218.146.225.166",
+                "port": 1883,
+                "priority": 1,
+                "enabled": true
+            }
+        ],
+        "topic_prefix": "iot/sensor"
+    },
+    "sensors": [
+        {
+            "id": "temp_001",
+            "type": "temperature",
+            "unit": "C",
+            "topic": "iot/sensor/temperature/temp_001",
+            "payload_schema_mode": "defined_sensor",
+            "policy": "apr",
+            "min": 20,
+            "max": 40,
+            "start": 25,
+            "step": 0.5,
+            "interval": 1,
+            "mode": "random_walk"
+        },
+        {
+            "id": "humi_001",
+            "type": "humidity",
+            "unit": "%",
+            "topic": "iot/sensor/humi_001",
+            "mode": "random_walk",
+            "interval": 1,
+            "min": 30,
+            "max": 90,
+            "start": 50,
+            "step": 2
+        },
+        {
+            "id": "vib_001",
+            "type": "vibration",
+            "unit": "mm/s",
+            "topic": "iot/sensor/vib_001",
+            "mode": "random_walk",
+            "interval": 1,
+            "min": 0,
+            "max": 10,
+            "start": 2,
+            "step": 0.3
+        },
+        {
+            "id": "vib_002",
+            "type": "number",
+            "unit": "mm/s",
+            "topic": "iot/sensor/vib_002",
+            "mode": "random_walk",
+            "min": 2,
+            "max": 100,
+            "start": 1,
+            "step": 1,
+            "interval": 1
+        },
+        {
+            "id": "temp_002",
+            "type": "temperature",
+            "unit": "C",
+            "topic": "iot/sensor/Temp_02",
+            "mode": "random_walk",
+            "min": -10,
+            "max": 100,
+            "start": 1,
+            "step": 0.5,
+            "interval": 1
+        }
+    ],
+    "platform": {
+        "mode": "hybrid",
+        "experiment_id": "EXP_001",
+        "enable_experiment_log": true,
+        "enable_apr": true,
+        "auto_apr": true,
+        "apr_min_samples": 5,
+        "apr_evaluation_interval_seconds": 30,
+        "apr_skip_unchanged_policy": true,
+        "apr_rollback_enabled": true,
+        "apr_rollback_latency_increase_pct": 10,
+        "publisher_queue_size": 1000,
+        "publisher_retry_count": 1,
+        "network_profile": {
+            "enabled": false,
+            "base_delay_ms": 0,
+            "jitter_ms": 0,
+            "drop_rate": 0
+        },
+        "db_writer": {
+            "batch_size": 100,
+            "flush_interval": 0.1,
+            "max_queue_size": 20000
+        },
+        "default_qos": 0,
+        "default_policy": {
+            "compression": "none",
+            "encryption": "none",
+            "integrity": "none"
+        }
+    }
+}

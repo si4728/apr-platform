@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>IoT Simulation Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        table {
+            border-collapse: collapse;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+
+        th, td {
+            padding: 6px 10px;
+            text-align: center;
+        }
+
+        input, select, button {
+            margin: 4px;
+            padding: 5px;
+        }
+
+        .control-panel {
+            margin-bottom: 15px;
+        }
+
+        .chart-box {
+            width: 850px;
+            height: 320px;
+            border: 1px solid #ccc;
+            padding: 10px;
+        }
+
+        .sensor-form {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 20px;
+            margin-bottom: 20px;
+        }
+
+        .sensor-row:hover {
+            background-color: #f0f0f0;
+            cursor: pointer;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>IoT Simulation Dashboard</h2>
+
+    <h3>센서 통계</h3>
+    <table border="1">
+        <thead>
+            <tr>
+                <th>Sensor ID</th>
+                <th>Type</th>
+                <th>Count</th>
+                <th>Avg</th>
+                <th>Min</th>
+                <th>Max</th>
+            </tr>
+        </thead>
+        <tbody id="statsTable"></tbody>
+    </table>
+
+    <h3>실시간 그래프</h3>
+
+    <div class="control-panel">
+        <label>
+            센서 선택:
+            <select id="sensorSelect"></select>
+        </label>
+
+        <label>
+            최근 데이터:
+            <select id="dataLimit">
+                <option value="30">30개</option>
+                <option value="50" selected>50개</option>
+                <option value="100">100개</option>
+                <option value="200">200개</option>
+            </select>
+        </label>
+
+        <label>
+            시간 표시 간격:
+            <select id="tickInterval">
+                <option value="1">1개마다</option>
+                <option value="5" selected>5개마다</option>
+                <option value="10">10개마다</option>
+            </select>
+        </label>
+    </div>
+
+    <div class="chart-box">
+        <canvas id="sensorChart"></canvas>
+    </div>
+
+    <hr>
+
+    <h3>센서 설정 관리</h3>
+
+    <div class="sensor-form">
+        <input id="sensorId" placeholder="sensor id">
+        <input id="sensorType" placeholder="type">
+        <input id="sensorUnit" placeholder="unit">
+        <input id="sensorTopic" placeholder="topic">
+
+        <br>
+
+        <input id="sensorMin" type="number" placeholder="min">
+        <input id="sensorMax" type="number" placeholder="max">
+        <input id="sensorStart" type="number" placeholder="start">
+        <input id="sensorStep" type="number" placeholder="step">
+        <input id="sensorInterval" type="number" placeholder="interval">
+
+        <select id="sensorMode">
+            <option value="random_walk">random_walk</option>
+            <option value="random">random</option>
+        </select>
+
+        <br>
+
+        <button onclick="addSensor()">센서 추가</button>
+        <button onclick="updateSensor()">센서 수정</button>
+        <button onclick="deleteSensor()">센서 삭제</button>
+        <button onclick="clearForm()">입력 초기화</button>
+    </div>
+
+    <h4>현재 센서 목록</h4>
+    <table border="1">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Type</th>
+                <th>Unit</th>
+                <th>Topic</th>
+                <th>Range</th>
+                <th>Start</th>
+                <th>Step</th>
+                <th>Mode</th>
+                <th>Interval</th>
+            </tr>
+        </thead>
+        <tbody id="sensorConfigTable"></tbody>
+    </table>
+
+    <script>
+        let chart = null;
+        let currentSensorId = null;
+
+        const sensorAxisRange = {
+            "temp_001": { min: 15, max: 45 },
+            "humi_001": { min: 20, max: 100 },
+            "vib_001": { min: 0, max: 12 }
+        };
+
+        function getYAxisRange(sensorId, values) {
+            if (sensorAxisRange[sensorId]) {
+                return sensorAxisRange[sensorId];
+            }
+
+            if (!values || values.length === 0) {
+                return { min: 0, max: 100 };
+            }
+
+            const minValue = Math.min(...values);
+            const maxValue = Math.max(...values);
+
+            if (minValue === maxValue) {
+                return {
+                    min: minValue - 5,
+                    max: maxValue + 5
+                };
+            }
+
+            return {
+                min: Math.floor(minValue - 5),
+                max: Math.ceil(maxValue + 5)
+            };
+        }
+
+        async function loadStats() {
+            const res = await fetch("/api/stats");
+            const data = await res.json();
+
+            const table = document.getElementById("statsTable");
+            const select = document.getElementById("sensorSelect");
+            const previousSensor = select.value;
+
+            table.innerHTML = "";
+            select.innerHTML = "";
+
+            data.forEach(row => {
+                table.innerHTML += `
+                    <tr>
+                        <td>${row.sensor_id}</td>
+                        <td>${row.sensor_type}</td>
+                        <td>${row.count}</td>
+                        <td>${row.avg}</td>
+                        <td>${row.min}</td>
+                        <td>${row.max}</td>
+                    </tr>
+                `;
+
+                select.innerHTML += `
+                    <option value="${row.sensor_id}">
+                        ${row.sensor_id} / ${row.sensor_type}
+                    </option>
+                `;
+            });
+
+            if (previousSensor) {
+                select.value = previousSensor;
+            }
+        }
+
+        async function loadChart() {
+            const sensorId = document.getElementById("sensorSelect").value;
+            const dataLimit = parseInt(document.getElementById("dataLimit").value);
+            const tickInterval = parseInt(document.getElementById("tickInterval").value);
+
+            if (!sensorId) return;
+
+            const res = await fetch(`/api/chart/${sensorId}?limit=${dataLimit}`);
+            const data = await res.json();
+
+            const labels = data.labels;
+            const values = data.values;
+
+            const yRange = getYAxisRange(sensorId, values);
+
+            if (!chart || currentSensorId !== sensorId) {
+                createChart(sensorId, labels, values, yRange, tickInterval);
+                currentSensorId = sensorId;
+            } else {
+                chart.data.labels = labels;
+                chart.data.datasets[0].data = values;
+
+                chart.options.scales.y.min = yRange.min;
+                chart.options.scales.y.max = yRange.max;
+
+                chart.options.scales.x.ticks.callback = function(value, index) {
+                    if (index % tickInterval === 0) {
+                        return this.getLabelForValue(value);
+                    }
+                    return "";
+                };
+
+                chart.update("none");
+            }
+        }
+
+        function createChart(sensorId, labels, values, yRange, tickInterval) {
+            const ctx = document.getElementById("sensorChart");
+
+            if (chart) {
+                chart.destroy();
+            }
+
+            chart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: sensorId,
+                        data: values,
+                        borderWidth: 2,
+                        tension: 0.25,
+                        pointRadius: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    scales: {
+                        x: {
+                            ticks: {
+                                callback: function(value, index) {
+                                    if (index % tickInterval === 0) {
+                                        return this.getLabelForValue(value);
+                                    }
+                                    return "";
+                                }
+                            }
+                        },
+                        y: {
+                            min: yRange.min,
+                            max: yRange.max
+                        }
+                    }
+                }
+            });
+        }
+
+        async function loadSensorConfig() {
+            const res = await fetch("/api/sensors");
+            const sensors = await res.json();
+
+            const table = document.getElementById("sensorConfigTable");
+            table.innerHTML = "";
+
+            sensors.forEach(s => {
+                const encoded = encodeURIComponent(JSON.stringify(s));
+
+                table.innerHTML += `
+                    <tr class="sensor-row" onclick="selectSensorConfig('${encoded}')">
+                        <td>${s.id}</td>
+                        <td>${s.type}</td>
+                        <td>${s.unit}</td>
+                        <td>${s.topic}</td>
+                        <td>${s.min} ~ ${s.max}</td>
+                        <td>${s.start}</td>
+                        <td>${s.step}</td>
+                        <td>${s.mode}</td>
+                        <td>${s.interval}</td>
+                    </tr>
+                `;
+            });
+        }
+
+        function getSensorFormData() {
+            return {
+                id: document.getElementById("sensorId").value.trim(),
+                type: document.getElementById("sensorType").value.trim(),
+                unit: document.getElementById("sensorUnit").value.trim(),
+                topic: document.getElementById("sensorTopic").value.trim(),
+                mode: document.getElementById("sensorMode").value,
+                min: parseFloat(document.getElementById("sensorMin").value),
+                max: parseFloat(document.getElementById("sensorMax").value),
+                start: parseFloat(document.getElementById("sensorStart").value),
+                step: parseFloat(document.getElementById("sensorStep").value),
+                interval: parseFloat(document.getElementById("sensorInterval").value)
+            };
+        }
+
+        function validateSensor(sensor) {
+            if (!sensor.id) {
+                alert("sensor id를 입력하세요.");
+                return false;
+            }
+
+            if (!sensor.type) {
+                alert("sensor type을 입력하세요.");
+                return false;
+            }
+
+            if (!sensor.unit) {
+                alert("unit을 입력하세요.");
+                return false;
+            }
+
+            if (isNaN(sensor.min) || isNaN(sensor.max)) {
+                alert("min, max 값을 입력하세요.");
+                return false;
+            }
+
+            if (sensor.min >= sensor.max) {
+                alert("min은 max보다 작아야 합니다.");
+                return false;
+            }
+
+            if (isNaN(sensor.start)) {
+                sensor.start = sensor.min;
+            }
+
+            if (isNaN(sensor.step)) {
+                sensor.step = 1;
+            }
+
+            if (isNaN(sensor.interval) || sensor.interval <= 0) {
+                sensor.interval = 1;
+            }
+
+            return true;
+        }
+
+        function selectSensorConfig(encoded) {
+            const s = JSON.parse(decodeURIComponent(encoded));
+
+            document.getElementById("sensorId").value = s.id;
+            document.getElementById("sensorType").value = s.type;
+            document.getElementById("sensorUnit").value = s.unit;
+            document.getElementById("sensorTopic").value = s.topic;
+            document.getElementById("sensorMode").value = s.mode;
+            document.getElementById("sensorMin").value = s.min;
+            document.getElementById("sensorMax").value = s.max;
+            document.getElementById("sensorStart").value = s.start;
+            document.getElementById("sensorStep").value = s.step;
+            document.getElementById("sensorInterval").value = s.interval;
+        }
+
+        async function addSensor() {
+            const sensor = getSensorFormData();
+
+            if (!validateSensor(sensor)) return;
+
+            const res = await fetch("/api/sensors", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(sensor)
+            });
+
+            const result = await res.json();
+            alert(result.message || result.error);
+
+            await loadSensorConfig();
+            await refresh();
+        }
+
+        async function updateSensor() {
+            const sensor = getSensorFormData();
+
+            if (!validateSensor(sensor)) return;
+
+            const res = await fetch(`/api/sensors/${sensor.id}`, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(sensor)
+            });
+
+            const result = await res.json();
+            alert(result.message || result.error);
+
+            currentSensorId = null;
+
+            await loadSensorConfig();
+            await refresh();
+        }
+
+        async function deleteSensor() {
+            const sensorId = document.getElementById("sensorId").value.trim();
+
+            if (!sensorId) {
+                alert("삭제할 sensor id를 입력하세요.");
+                return;
+            }
+
+            const ok = confirm(`${sensorId} 센서를 삭제하시겠습니까?`);
+
+            if (!ok) return;
+
+            const res = await fetch(`/api/sensors/${sensorId}`, {
+                method: "DELETE"
+            });
+
+            const result = await res.json();
+            alert(result.message || result.error);
+
+            currentSensorId = null;
+            clearForm();
+
+            await loadSensorConfig();
+            await refresh();
+        }
+
+        function clearForm() {
+            document.getElementById("sensorId").value = "";
+            document.getElementById("sensorType").value = "";
+            document.getElementById("sensorUnit").value = "";
+            document.getElementById("sensorTopic").value = "";
+            document.getElementById("sensorMin").value = "";
+            document.getElementById("sensorMax").value = "";
+            document.getElementById("sensorStart").value = "";
+            document.getElementById("sensorStep").value = "";
+            document.getElementById("sensorInterval").value = "";
+            document.getElementById("sensorMode").value = "random_walk";
+        }
+
+        async function refresh() {
+            await loadStats();
+            await loadChart();
+        }
+
+        document.getElementById("sensorSelect").addEventListener("change", () => {
+            currentSensorId = null;
+            loadChart();
+        });
+
+        document.getElementById("dataLimit").addEventListener("change", loadChart);
+        document.getElementById("tickInterval").addEventListener("change", loadChart);
+
+        setInterval(refresh, 3000);
+
+        loadSensorConfig();
+        refresh();
+    </script>
+</body>
+</html>

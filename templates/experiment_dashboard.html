@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Automated Experiment Framework</title>
+
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+    
+    <style>
+        .exp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 25px; }
+        .exp-card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        .exp-title { font-size: 16px; font-weight: bold; color: #1e3a8a; margin-bottom: 8px; }
+        .exp-desc { font-size: 13px; color: #4b5563; min-height: 50px; margin-bottom: 15px; }
+        .btn-run { padding: 8px 16px; background: #2563eb; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-align: center; }
+        .btn-run:hover { background: #1d4ed8; }
+        
+        .status-running { color: #f59e0b; font-weight: bold; }
+        .status-idle { color: #10b981; font-weight: bold; }
+    </style>
+</head>
+
+<body>
+<div class="layout">
+
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+        
+        <div class="info-box">
+            <h3>Experiment Framework</h3>
+            <p style="font-size: 13px; color: #4b5563;">사전 작성된 4단계 시나리오 실험 파일들을 백엔드 백그라운드 스레드에서 직접 작동시키고 지연 시간과 데이터 흐름 통계를 관측합니다.</p>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>Automated Experiment Automation Framework</h2>
+            <div>자동화 시나리오 원격 트리거링 & 실시간 로깅 모니터</div>
+        </div>
+
+        <section class="dashboard-section">
+            <div class="exp-grid">
+                
+                <div class="exp-card">
+                    <div>
+                        <div class="exp-title">QoS Level Test</div>
+                        <div class="exp-desc">QoS 0, 1, 2 에 따른 전송 신뢰도 및 통계적 E2E 지연 속도를 비교 테스트합니다.</div>
+                    </div>
+                    <button class="btn-run" onclick="runExperiment('qos')">실험 시작 (Run)</button>
+                </div>
+                
+                <div class="exp-card">
+                    <div>
+                        <div class="exp-title">Payload Size Test</div>
+                        <div class="exp-desc">메시지 크기 변동(100B~10KB)에 따라 발생하는 병목 현상 및 지연시간을 측정합니다.</div>
+                    </div>
+                    <button class="btn-run" onclick="runExperiment('payload_size')">실험 시작 (Run)</button>
+                </div>
+                
+                <div class="exp-card">
+                    <div>
+                        <div class="exp-title">Queue Stress Test</div>
+                        <div class="exp-desc">수백 개의 동시성 메시지를 쏟아내어 대기열(Backlog) 적체 상황에서의 Drop 카운트를 테스트합니다.</div>
+                    </div>
+                    <button class="btn-run" onclick="runExperiment('queue')">실험 시작 (Run)</button>
+                </div>
+                
+                <div class="exp-card">
+                    <div>
+                        <div class="exp-title">Schema Variation Test</div>
+                        <div class="exp-desc">다양한 가상 중첩/오류 스키마들을 실시간으로 유입시켜 스키마 분류 거리를 시뮬레이션합니다.</div>
+                    </div>
+                    <button class="btn-run" onclick="runExperiment('schema')">실험 시작 (Run)</button>
+                </div>
+                
+                <div class="exp-card">
+                    <div>
+                        <div class="exp-title">APR Validation Test</div>
+                        <div class="exp-desc">실시간 부하 매개변수에 맞춰 머신러닝 예측 기반 APR 정책이 동적으로 작동하는지 유효성 검증을 실시합니다.</div>
+                    </div>
+                    <button class="btn-run" onclick="runExperiment('apr')">실험 시작 (Run)</button>
+                </div>
+                
+            </div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <h3>실시간 실험 결과 로그</h3>
+                <button onclick="fetchExperimentLogs()" style="padding:6px 12px; background:#4b5563; color:white; border:none; border-radius:4px; cursor:pointer;">새로고침</button>
+            </div>
+            
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Exp ID</th>
+                        <th>Topic</th>
+                        <th>Latency</th>
+                        <th>Policy Applied</th>
+                    </tr>
+                    </thead>
+                    <tbody id="expLogsTable">
+                    <tr><td colspan="5">데이터를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<script>
+    async function runExperiment(type) {
+        if (!confirm(`${type.toUpperCase()} 실험을 백그라운드에서 시작하시겠습니까?`)) return;
+        
+        try {
+            const res = await fetch("/api/experiment/run", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ type })
+            });
+            const data = await res.json();
+            alert(data.message || data.error);
+            setTimeout(fetchExperimentLogs, 2000);
+        } catch (err) {
+            console.error(err);
+        }
+    }
+    
+    async function fetchExperimentLogs() {
+        try {
+            const res = await fetch("/api/experiment-log?limit=30");
+            const data = await res.json();
+            
+            const tbody = document.getElementById("expLogsTable");
+            tbody.innerHTML = "";
+            
+            if (data.length === 0) {
+                tbody.innerHTML = "<tr><td colspan='5'>적재된 실험 데이터 로그가 없습니다.</td></tr>";
+                return;
+            }
+            
+            data.forEach(row => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td>${row.created_at || row.received_timestamp || "-"}</td>
+                    <td><strong style="color:#2563eb">${row.experiment_id || "-"}</strong></td>
+                    <td>${row.topic || "-"}</td>
+                    <td><strong style="color:#ef4444">${row.latency_ms ? row.latency_ms.toFixed(2) + " ms" : "-"}</strong></td>
+                    <td><span style="font-family:monospace; font-size:11px;">${row.policy_key || "-"}</span></td>
+                `;
+                tbody.appendChild(tr);
+            });
+        } catch (err) {
+            console.error(err);
+        }
+    }
+    
+    window.onload = () => {
+        fetchExperimentLogs();
+        setInterval(fetchExperimentLogs, 5000);
+    };
+</script>
+</body>
+</html>

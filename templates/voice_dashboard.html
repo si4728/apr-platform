@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice over MQTT Streaming Dashboard</title>
+
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <style>
+        .voice-grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .voice-card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            border: 1px solid #f1f5f9;
+        }
+
+        .voice-card h3 {
+            margin-top: 0;
+            margin-bottom: 20px;
+            font-size: 18px;
+            color: #1e293b;
+            border-bottom: 2px solid #f1f5f9;
+            padding-bottom: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #475569;
+            font-size: 14px;
+        }
+
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 14px;
+            color: #334155;
+            background-color: #f8fafc;
+            transition: all 0.2s;
+        }
+
+        .form-group input:focus, .form-group select:focus {
+            border-color: #3b82f6;
+            outline: none;
+            background-color: white;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .btn-trigger {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 700;
+            cursor: pointer;
+            font-size: 15px;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+            transition: all 0.2s;
+        }
+
+        .btn-trigger:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3);
+        }
+
+        .btn-trigger:active {
+            transform: translateY(1px);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .badge-stable {
+            background-color: #dcfce7;
+            color: #15803d;
+        }
+
+        .badge-critical {
+            background-color: #ffedd5;
+            color: #c2410c;
+        }
+
+        .badge-overload {
+            background-color: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-box {
+            background: #f8fafc;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 800;
+            color: #1e293b;
+            margin-top: 5px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #64748b;
+        }
+
+        table.voice-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            font-size: 13px;
+        }
+
+        table.voice-table th, table.voice-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #f1f5f9;
+            text-align: left;
+        }
+
+        table.voice-table th {
+            background-color: #f8fafc;
+            color: #475569;
+            font-weight: 600;
+        }
+
+        table.voice-table tbody tr:hover {
+            background-color: #f8fafc;
+        }
+
+        .loader-overlay {
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            margin-top: 15px;
+            padding: 20px;
+            background: #f8fafc;
+            border-radius: 8px;
+            border: 1px dashed #cbd5e1;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #e2e8f0;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+
+<body>
+<div class="layout">
+
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+        
+        <div class="info-box">
+            <h3>Voice over MQTT</h3>
+            <p style="font-size: 13px; color: #cbd5e1; line-height:1.5;">G.711 µ-law 오디오 패킷(20ms 단위 프레임)의 실시간 음성 스트리밍 환경을 모사하여 지터 버퍼(Jitter Buffer)와 적응형 prebuffer 제어 실험을 검증합니다.</p>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>Voice over MQTT Streaming Simulation</h2>
+            <div>실시간 음성 스트리밍 품질 및 지터 제어 실험실</div>
+        </div>
+
+        <div class="voice-grid">
+            <!-- 설정 폼 -->
+            <div class="voice-card">
+                <h3>실험 조건 설정</h3>
+                
+                <div class="form-group">
+                    <label>Duration (측정 지속 시간 - 초)</label>
+                    <input type="number" id="duration" value="15" min="5" max="60">
+                </div>
+                
+                <div class="form-group">
+                    <label>Frames per Second (FPS)</label>
+                    <select id="fps">
+                        <option value="50">50 FPS (20ms 간격 - G.711 표준)</option>
+                        <option value="30">30 FPS (33.3ms 간격 - 대역 절약형)</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>Prebuffer Time (ms)</label>
+                    <select id="prebuffer">
+                        <option value="300" selected>300 ms (안정적 재생 권장)</option>
+                        <option value="100">100 ms (저지연 - 갭 발생 우려)</option>
+                        <option value="200">200 ms (적정 타협)</option>
+                        <option value="500">500 ms (고신뢰성 - 지연 증가)</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>Queue Drop Policy (대기열 드롭)</label>
+                    <select id="dropOn">
+                        <option value="1" selected>Drop ON (지연 바운딩 - 음성 우수)</option>
+                        <option value="0">Drop OFF (무손실 전송 - 지연 누적)</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>MQTT QoS Level</label>
+                    <select id="qos">
+                        <option value="0" selected>QoS 0 (빠른 전송)</option>
+                        <option value="1">QoS 1 (확실한 전달 - 오버헤드 있음)</option>
+                    </select>
+                </div>
+                
+                <button class="btn-trigger" id="btnRun" onclick="runVoiceTest()">🎙️ 음성 시뮬레이션 기동 (Run)</button>
+                
+                <div class="loader-overlay" id="loader">
+                    <div class="spinner"></div>
+                    <div id="loaderStatus" style="font-weight: bold; color: #475569;">시뮬레이션 가동 중...</div>
+                    <div style="font-size:12px; color:#64748b; margin-top:5px;">배후에서 Publisher 및 Subscriber 동시 기동 중입니다.</div>
+                </div>
+            </div>
+
+            <!-- 결과 표시 -->
+            <div class="voice-card">
+                <h3>최근 시뮬레이션 결과 요약</h3>
+                
+                <div id="noDataMsg" style="text-align: center; padding: 40px 0; color: #64748b;">
+                    시뮬레이션을 기동하거나, 완료된 기록 데이터를 불러오십시오.
+                </div>
+                
+                <div id="summaryResults" style="display: none;">
+                    <div class="stat-grid">
+                        <div class="stat-box">
+                            <div class="stat-label">음질 상태 등급</div>
+                            <div style="margin-top:8px;" id="qualityBadge">
+                                <span class="status-badge badge-stable">Stable</span>
+                            </div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Gap Ratio (갭 발생율)</div>
+                            <div class="stat-value" id="resGapRatio">0.00%</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">평균 Latency</div>
+                            <div class="stat-value" id="resLatency">0.0 ms</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">네트워크 Jitter</div>
+                            <div class="stat-value" id="resJitter">0.0 ms</div>
+                        </div>
+                    </div>
+
+                    <div style="height: 250px; position: relative;">
+                        <canvas id="voiceChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 전체 결과 로그 리스트 -->
+        <div class="voice-card" style="margin-top: 20px;">
+            <h3>시뮬레이션 이력 관리</h3>
+            <div style="max-height: 300px; overflow-y: auto;">
+                <table class="voice-table">
+                    <thead>
+                        <tr>
+                            <th>실험 ID</th>
+                            <th>환경 설정</th>
+                            <th>FPS / QoS</th>
+                            <th>Prebuffer</th>
+                            <th>Drop 여부</th>
+                            <th>수신/재생 프레임</th>
+                            <th>Gap 비율</th>
+                            <th>평균 지연 (Max)</th>
+                            <th>지터</th>
+                            <th>실행 시간</th>
+                        </tr>
+                    </thead>
+                    <tbody id="voiceLogsBody">
+                        <tr>
+                            <td colspan="10" style="text-align: center; color:#64748b;">이력 데이터를 가져오는 중...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+<script>
+    let myChart = null;
+    let pollInterval = null;
+    let expectedDuration = 15;
+    let startTime = 0;
+
+    async function loadVoiceLogs(selectFirst = false) {
+        try {
+            const res = await fetch("/api/voice/results");
+            const data = await res.json();
+            
+            const tbody = document.getElementById("voiceLogsBody");
+            if (data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" style="text-align:center; color:#64748b;">등록된 실험 이력이 없습니다.</td></tr>`;
+                document.getElementById("noDataMsg").style.display = "block";
+                document.getElementById("summaryResults").style.display = "none";
+                return;
+            }
+
+            tbody.innerHTML = "";
+            data.forEach((r, idx) => {
+                const tr = document.createElement("tr");
+                tr.style.cursor = "pointer";
+                tr.onclick = () => selectLog(r);
+                
+                const dt = new Date(r.created_at).toLocaleString();
+                
+                tr.innerHTML = `
+                    <td style="font-weight: bold; color: #1e3a8a;">${r.experiment_id.substring(11)}</td>
+                    <td>${r.scenario}</td>
+                    <td>${r.fps} fps / QoS ${r.qos}</td>
+                    <td>${r.prebuffer_ms} ms</td>
+                    <td><span class="status-badge ${r.drop_on ? 'badge-stable' : 'badge-critical'}">${r.drop_on ? 'ON' : 'OFF'}</span></td>
+                    <td>${r.received_frames} / ${r.played_frames}</td>
+                    <td style="font-weight: bold; color: ${r.gap_ratio_pct > 5 ? '#c2410c' : '#15803d'};">${r.gap_ratio_pct.toFixed(2)}%</td>
+                    <td>${r.latency_avg_ms.toFixed(1)} ms (${r.latency_max_ms.toFixed(1)})</td>
+                    <td>${r.jitter_ms.toFixed(1)} ms</td>
+                    <td style="color:#64748b; font-size:11px;">${dt}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            if (selectFirst && data.length > 0) {
+                selectLog(data[0]);
+            }
+        } catch (err) {
+            console.error("Failed to load logs:", err);
+        }
+    }
+
+    function selectLog(r) {
+        document.getElementById("noDataMsg").style.display = "none";
+        document.getElementById("summaryResults").style.display = "block";
+
+        // 품질 뱃지
+        const quality = document.getElementById("qualityBadge");
+        if (r.gap_ratio_pct < 5.0) {
+            quality.innerHTML = `<span class="status-badge badge-stable">Stable (안정)</span>`;
+        } else if (r.gap_ratio_pct < 20.0) {
+            quality.innerHTML = `<span class="status-badge badge-critical">Critical (경고)</span>`;
+        } else {
+            quality.innerHTML = `<span class="status-badge badge-overload">Overload (심각)</span>`;
+        }
+
+        document.getElementById("resGapRatio").textContent = r.gap_ratio_pct.toFixed(2) + "%";
+        document.getElementById("resLatency").textContent = r.latency_avg_ms.toFixed(1) + " ms";
+        document.getElementById("resJitter").textContent = r.jitter_ms.toFixed(1) + " ms";
+
+        // 차트 업데이트
+        renderChart(r);
+    }
+
+    function renderChart(r) {
+        const ctx = document.getElementById("voiceChart").getContext("2d");
+        
+        if (myChart) {
+            myChart.destroy();
+        }
+
+        myChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['Avg Latency (ms)', 'P95 Latency (ms)', 'Max Latency (ms)', 'Jitter (ms)', 'Gap Ratio (%)'],
+                datasets: [{
+                    label: r.experiment_id,
+                    data: [
+                        r.latency_avg_ms,
+                        r.latency_p95_ms,
+                        r.latency_max_ms,
+                        r.jitter_ms,
+                        r.gap_ratio_pct
+                    ],
+                    backgroundColor: [
+                        'rgba(59, 130, 246, 0.7)',
+                        'rgba(99, 102, 241, 0.7)',
+                        'rgba(239, 68, 68, 0.7)',
+                        'rgba(245, 158, 11, 0.7)',
+                        'rgba(16, 185, 129, 0.7)'
+                    ],
+                    borderColor: [
+                        'rgb(59, 130, 246)',
+                        'rgb(99, 102, 241)',
+                        'rgb(239, 68, 68)',
+                        'rgb(245, 158, 11)',
+                        'rgb(16, 185, 129)'
+                    ],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    }
+
+    async function runVoiceTest() {
+        const duration = parseInt(document.getElementById("duration").value);
+        const fps = parseFloat(document.getElementById("fps").value);
+        const prebuffer = parseInt(document.getElementById("prebuffer").value);
+        const drop_on = document.getElementById("dropOn").value === "1";
+        const qos = parseInt(document.getElementById("qos").value);
+
+        expectedDuration = duration;
+        startTime = Date.now();
+
+        // UI 제어 비활성화
+        document.getElementById("btnRun").disabled = true;
+        document.getElementById("loader").style.display = "flex";
+
+        try {
+            const res = await fetch("/api/experiment/run", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ type: "voice", duration, fps, prebuffer, drop_on, qos })
+            });
+
+            // 주기적 폴링 개시하여 완료 시점 탐지
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(checkCompletion, 2000);
+        } catch (err) {
+            console.error(err);
+            resetUI();
+        }
+    }
+
+    async function checkCompletion() {
+        const elapsed = (Date.now() - startTime) / 1000;
+        
+        // Progress 업데이트
+        const statusText = document.getElementById("loaderStatus");
+        const remaining = Math.max(0, Math.ceil((expectedDuration + 8) - elapsed));
+        
+        if (remaining > 0) {
+            statusText.textContent = `시뮬레이션 기동 중... (예상 완료까지 ${remaining}초)`;
+        } else {
+            statusText.textContent = `결과 수집 및 분석 마감 중...`;
+        }
+
+        // 안전 마진(expectedDuration + 5초) 이후부터 결과 목록 대조
+        if (elapsed > expectedDuration + 3) {
+            try {
+                const res = await fetch("/api/voice/results");
+                const data = await res.json();
+                
+                if (data.length > 0) {
+                    const latest = data[0];
+                    const recordTime = new Date(latest.created_at).getTime();
+                    // 기동 시간보다 기록된 시각이 최신이면 시뮬레이션 끝난 것임!
+                    if (recordTime > startTime) {
+                        clearInterval(pollInterval);
+                        resetUI();
+                        loadVoiceLogs(true); // 최신 시뮬레이션 결과 로드!
+                    }
+                }
+            } catch (err) {
+                console.error("Polling error:", err);
+            }
+        }
+    }
+
+    function resetUI() {
+        document.getElementById("btnRun").disabled = false;
+        document.getElementById("loader").style.display = "none";
+    }
+
+    window.onload = () => {
+        loadVoiceLogs(true);
+    };
+</script>
+</body>
+</html>

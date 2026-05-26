@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.pytest_cache/
+.venv/
+venv/
+.python_packages/
+gateway.out.log
+gateway.err.log

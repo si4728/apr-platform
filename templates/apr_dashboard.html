@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>APR Recommendation Simulator</title>
+
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+    
+    <style>
+        .apr-container { display: flex; gap: 20px; }
+        .apr-form { flex: 1; background: white; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb; }
+        .apr-result { flex: 1.2; background: white; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb; display: flex; flex-direction: column; justify-content: space-between; }
+        
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; font-weight: bold; margin-bottom: 5px; color: #4b5563; }
+        .form-group input, .form-group select { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; box-sizing: border-box; }
+        
+        .btn-recommend { width: 100%; padding: 12px; background: #2563eb; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; }
+        .btn-recommend:hover { background: #1d4ed8; }
+        .btn-recommend:disabled { background: #9ca3af; cursor: not-allowed; }
+        
+        .policy-card { background: #f3f4f6; border-left: 5px solid #10b981; padding: 15px; border-radius: 4px; margin-top: 10px; }
+        .policy-item { display: flex; justify-content: space-between; margin-bottom: 8px; border-bottom: 1px dashed #e5e7eb; padding-bottom: 5px; }
+        .policy-label { font-weight: bold; color: #4b5563; }
+        .policy-value { color: #059669; font-weight: bold; }
+
+        /* 수집 제어 패널 */
+        .collect-panel { background: #fffbeb; border: 1px solid #fbbf24; border-radius: 8px; padding: 20px; margin-top: 20px; }
+        .collect-panel h3 { margin: 0 0 15px; color: #92400e; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+        .collect-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+        .collect-row .form-group { flex: 1; min-width: 160px; margin-bottom: 0; }
+        .btn-collect { padding: 9px 18px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; white-space: nowrap; }
+        .btn-start  { background: #f59e0b; color: white; }
+        .btn-start:hover  { background: #d97706; }
+        .btn-eval   { background: #7c3aed; color: white; }
+        .btn-eval:hover   { background: #6d28d9; }
+        .btn-status { background: #0ea5e9; color: white; }
+        .btn-status:hover { background: #0284c7; }
+
+        /* 수집 상태 카드 */
+        .collect-status-area { margin-top: 14px; }
+        .collect-status-card { background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 16px; font-size: 13px; }
+        .collect-status-card .sid { font-weight: bold; color: #1d4ed8; }
+        .collect-status-card .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; margin-left: 6px;
+        }
+        .badge-active { background: #dcfce7; color: #166534; }
+        .badge-idle   { background: #f1f5f9; color: #475569; }
+        .badge-ready  { background: #ede9fe; color: #5b21b6; }
+        .progress-bar-bg { background: #e5e7eb; border-radius: 4px; height: 8px; margin-top: 6px; }
+        .progress-bar-fill { background: #f59e0b; border-radius: 4px; height: 8px; transition: width 0.4s; }
+        .collect-result { margin-top: 10px; padding: 10px 14px; background: #f0fdf4; border: 1px solid #86efac; border-radius: 6px; font-size: 13px; }
+    </style>
+</head>
+
+<body>
+<div class="layout">
+
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+        
+        <div class="info-box">
+            <h3>APR Simulator</h3>
+            <p style="font-size: 13px; color: #4b5563;">XGBoost 머신러닝 모델을 사용하여 네트워크 상태와 스키마 특성에 최적화된 패킷 정책(QoS, 압축, 암호화, 무결성) 추천 결과를 실시간 모사합니다.</p>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>Adaptive Policy Recommendation Simulator</h2>
+            <div>XGBoost ML 기반 정책 추천 시뮬레이션 패널</div>
+        </div>
+
+        <!-- ① 수동 시뮬레이션 패널 (기존) -->
+        <section class="dashboard-section apr-container">
+            <div class="apr-form">
+                <h3 style="margin-top:0;">환경 매개변수 입력</h3>
+                
+                <div class="form-group">
+                    <label>Payload Size (bytes)</label>
+                    <input type="number" id="payloadSize" value="256" min="1">
+                </div>
+                <div class="form-group">
+                    <label>Network Latency (ms)</label>
+                    <input type="number" id="networkLatency" value="15" min="0">
+                </div>
+                <div class="form-group">
+                    <label>Queue Depth (backlog count)</label>
+                    <input type="number" id="queueDepth" value="5" min="0">
+                </div>
+                <div class="form-group">
+                    <label>MQTT Topic</label>
+                    <input type="text" id="topicName" value="iot/sensor/normal">
+                </div>
+                <div class="form-group">
+                    <label>Schema Security Type</label>
+                    <select id="schemaType">
+                        <option value="json">일반 JSON (Standard)</option>
+                        <option value="sensitive">보안/민감 데이터 (Sensitive)</option>
+                        <option value="unknown">미정의 스키마 (Unknown)</option>
+                    </select>
+                </div>
+                
+                <button class="btn-recommend" onclick="simulateAPR()">추천 정책 생성 (Simulate)</button>
+            </div>
+            
+            <div class="apr-result">
+                <h3 style="margin-top:0;">추천 정책 결과</h3>
+                
+                <div class="policy-card">
+                    <div class="policy-item">
+                        <span class="policy-label">MQTT QoS Level</span>
+                        <span class="policy-value" id="resQos">-</span>
+                    </div>
+                    <div class="policy-item">
+                        <span class="policy-label">Compression (압축)</span>
+                        <span class="policy-value" id="resCompression">-</span>
+                    </div>
+                    <div class="policy-item">
+                        <span class="policy-label">Encryption (암호화)</span>
+                        <span class="policy-value" id="resEncryption">-</span>
+                    </div>
+                    <div class="policy-item">
+                        <span class="policy-label">Integrity Hash (무결성)</span>
+                        <span class="policy-value" id="resIntegrity">-</span>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 15px; font-size:12px; color:#6b7280; background:#f9fafb; padding:10px; border-radius:4px; border: 1px solid #e5e7eb; margin-bottom: 15px;">
+                    * <strong>실시간 예측 근거</strong>: 용량이 크고 지연속도가 낮을 때 ML이 적극적인 압축(zlib/gzip)을 추천하며, 민감성 데이터 유형 입력 시 강력한 AES-GCM 및 HMAC SHA256 암호화 적용을 보장합니다.
+                </div>
+
+                <button class="btn-recommend" id="btnApply" style="background: #10b981; font-size: 15px;" onclick="applyAndPublish()">실제 클라이언트에 적용 및 실시간 전송</button>
+            </div>
+        </section>
+
+        <!-- ② 관리자 수집 제어 패널 (신규) -->
+        <section class="dashboard-section">
+            <div class="collect-panel">
+                <h3>📡 관리자 정책 수집 제어 (논문 프로세스)</h3>
+                <p style="font-size: 13px; color: #78350f; margin: 0 0 14px;">
+                    디바이스에 <strong>수집 명령</strong>을 전송 → 수신 데이터에서 메트릭 자동 축적 → <strong>정책 결정 &amp; push</strong> 순서로 진행합니다.<br>
+                    디바이스는 <code>iot/sensor/&lt;path&gt;</code>(데이터)와 <code>iot/sensor/policy/&lt;id&gt;</code>(정책명령) 2개 토픽으로 운영됩니다.
+                </p>
+
+                <div class="collect-row">
+                    <div class="form-group">
+                        <label>대상 Sensor ID</label>
+                        <input type="text" id="collectSensorId" placeholder="예: temp_001" value="temp_001">
+                    </div>
+                    <button class="btn-collect btn-start" onclick="startCollection()">🔴 수집 시작</button>
+                    <button class="btn-collect btn-status" onclick="refreshStatus()">🔄 상태 조회</button>
+                    <button class="btn-collect btn-eval" id="btnEval" onclick="evaluatePolicy()">⚡ 정책 결정 &amp; Push</button>
+                </div>
+
+                <!-- 수집 상태 표시 -->
+                <div class="collect-status-area" id="collectStatusArea" style="display:none;">
+                    <div class="collect-status-card" id="collectStatusCard"></div>
+                </div>
+
+                <!-- 결정된 정책 결과 표시 -->
+                <div class="collect-result" id="collectResult" style="display:none;"></div>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<script>
+    let lastRecommendation = null;
+    let statusPollTimer = null;
+
+    /* ── 기존 시뮬레이션 ─────────────────────────────── */
+    async function simulateAPR() {
+        const payload_size = parseInt(document.getElementById("payloadSize").value);
+        const network_latency_ms = parseFloat(document.getElementById("networkLatency").value);
+        const queue_depth = parseInt(document.getElementById("queueDepth").value);
+        const topic = document.getElementById("topicName").value;
+        const schema_type = document.getElementById("schemaType").value;
+        
+        try {
+            const res = await fetch("/api/apr/recommend", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ payload_size, network_latency_ms, queue_depth, topic, schema_type })
+            });
+            const policy = await res.json();
+            lastRecommendation = policy;
+            
+            document.getElementById("resQos").textContent = "QoS " + policy.qos;
+            document.getElementById("resCompression").textContent = policy.compression.toUpperCase();
+            document.getElementById("resEncryption").textContent = policy.encryption.toUpperCase();
+            document.getElementById("resIntegrity").textContent = policy.integrity.toUpperCase();
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function applyAndPublish() {
+        if (!lastRecommendation) return;
+        
+        const payload_size = parseInt(document.getElementById("payloadSize").value);
+        const topic = document.getElementById("topicName").value;
+        const btn = document.getElementById("btnApply");
+        btn.disabled = true;
+        btn.textContent = "적용 및 전송 중...";
+        
+        try {
+            const res = await fetch("/api/apr/publish-with-policy", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ policy: lastRecommendation, topic: topic, payload_size: payload_size })
+            });
+            const result = await res.json();
+            if (result.status === "success") {
+                alert(`[정책 적용 및 전송 성공]\n\n추천된 통신 정책(QoS ${lastRecommendation.qos}, ${lastRecommendation.compression.toUpperCase()}, ${lastRecommendation.encryption.toUpperCase()})이 클라이언트에 실시간 반영되었습니다!\n\n발행 패킷 ID: ${result.experiment_id}`);
+            } else {
+                alert("적용 및 전송 실패: " + result.error);
+            }
+        } catch (err) {
+            console.error(err);
+            alert("통신 중 오류가 발생했습니다.");
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "실제 클라이언트에 적용 및 실시간 전송";
+        }
+    }
+
+    /* ── 관리자 수집 제어 ─────────────────────────────── */
+
+    // 수집 시작: device에 collect 명령 전송 + 서버 버퍼 활성화
+    async function startCollection() {
+        const sensor_id = document.getElementById("collectSensorId").value.trim();
+        if (!sensor_id) { alert("Sensor ID를 입력하세요."); return; }
+
+        const res = await fetch("/api/apr/collection/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sensor_id })
+        });
+        const result = await res.json();
+        showCollectStatus({ [sensor_id]: { active: true, buffered_samples: 0, min_required: 5, ready_to_evaluate: false, current_policy: null } });
+        document.getElementById("collectResult").style.display = "none";
+
+        // 3초마다 자동 상태 갱신
+        if (statusPollTimer) clearInterval(statusPollTimer);
+        statusPollTimer = setInterval(refreshStatus, 3000);
+
+        alert(`[수집 시작] ${sensor_id}\n\n디바이스에 수집 명령이 전송되었습니다.\n메트릭이 쌓이면 "정책 결정 & Push" 버튼을 누르세요.`);
+    }
+
+    // 상태 조회
+    async function refreshStatus() {
+        const res = await fetch("/api/apr/collection/status");
+        const status = await res.json();
+        showCollectStatus(status);
+
+        // 수집 모드가 모두 종료되면 폴링 중단
+        const allDone = Object.values(status).every(s => !s.active);
+        if (allDone && statusPollTimer) {
+            clearInterval(statusPollTimer);
+            statusPollTimer = null;
+        }
+    }
+
+    function showCollectStatus(status) {
+        const area = document.getElementById("collectStatusArea");
+        const card = document.getElementById("collectStatusCard");
+        if (Object.keys(status).length === 0) {
+            area.style.display = "none";
+            return;
+        }
+        area.style.display = "block";
+
+        let html = "";
+        for (const [sid, s] of Object.entries(status)) {
+            const pct = Math.min(100, Math.round((s.buffered_samples / (s.min_required || 5)) * 100));
+            const badge = s.active
+                ? '<span class="badge badge-active">수집중</span>'
+                : s.ready_to_evaluate
+                    ? '<span class="badge badge-ready">결정 가능</span>'
+                    : '<span class="badge badge-idle">대기</span>';
+            const policy = s.current_policy
+                ? `QoS ${s.current_policy.qos} / ${(s.current_policy.compression||'none').toUpperCase()} / ${(s.current_policy.encryption||'none').toUpperCase()}`
+                : "없음 (기본 정책)";
+
+            html += `
+            <div style="margin-bottom:10px;">
+              <span class="sid">${sid}</span>${badge}
+              <div style="font-size:12px; color:#6b7280; margin-top:4px;">
+                수집: ${s.buffered_samples}건 / 최소 ${s.min_required}건 필요 &nbsp;|&nbsp; 현재 정책: ${policy}
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" style="width:${pct}%"></div>
+              </div>
+            </div>`;
+        }
+        card.innerHTML = html;
+    }
+
+    // 정책 결정 & push
+    async function evaluatePolicy() {
+        const sensor_id = document.getElementById("collectSensorId").value.trim();
+        if (!sensor_id) { alert("Sensor ID를 입력하세요."); return; }
+
+        const btn = document.getElementById("btnEval");
+        btn.disabled = true;
+        btn.textContent = "추론 중...";
+
+        try {
+            const res = await fetch("/api/apr/collection/evaluate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sensor_id })
+            });
+            const result = await res.json();
+
+            const area = document.getElementById("collectResult");
+            area.style.display = "block";
+
+            if (result.status === "success") {
+                const p = result.policy;
+                const m = result.avg_metrics;
+                area.innerHTML = `
+                    <strong>✅ 정책 결정 완료 → device C2 push</strong><br>
+                    <span style="color:#6b7280;">수집 ${result.sample_count}건 평균 (크기 ${m.payload_size.toFixed(0)}B · 지연 ${m.latency_ms.toFixed(1)}ms · 큐 ${m.queue_depth.toFixed(0)}개)</span><br><br>
+                    <strong>적용 정책:</strong>
+                    QoS <b>${p.qos}</b> &nbsp;|&nbsp;
+                    압축: <b>${(p.compression||'none').toUpperCase()}</b> &nbsp;|&nbsp;
+                    암호화: <b style="color:#7c3aed">${(p.encryption||'none').toUpperCase()}</b> &nbsp;|&nbsp;
+                    무결성: <b>${(p.integrity||'none').toUpperCase()}</b>
+                `;
+                // 상태 자동 갱신
+                setTimeout(refreshStatus, 800);
+            } else if (result.warning) {
+                area.innerHTML = `<strong>⚠️ ${result.warning}</strong> (현재 ${result.sample_count}건)`;
+            } else {
+                area.innerHTML = `<strong>❌ 오류:</strong> ${result.error}`;
+            }
+        } catch (err) {
+            console.error(err);
+            alert("평가 중 오류: " + err);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "⚡ 정책 결정 & Push";
+        }
+    }
+
+    window.onload = () => {
+        simulateAPR();
+        refreshStatus();
+    };
+</script>
+</body>
+</html>

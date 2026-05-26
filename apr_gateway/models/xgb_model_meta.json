@@ -1,0 +1,98 @@
+{
+  "model": "xgboost",
+  "metrics": {
+    "r2": 0.9180693792929736,
+    "mae": 0.1359913492841535,
+    "rmse": 0.32141898701584976,
+    "mape": 16.85385821202389
+  },
+  "num_cols": [
+    "data_size_pub",
+    "pub_ping",
+    "sub_ping",
+    "compress_time_pub",
+    "encryption_time_pub",
+    "hash_time_pub",
+    "subscribe_time_sub",
+    "hash_time_sub",
+    "decryption_time_sub",
+    "decompress_time_sub",
+    "msize_sub"
+  ],
+  "base_num_cols": [
+    "data_size_pub",
+    "pub_ping"
+  ],
+  "extra_num_cols": [
+    "sub_ping",
+    "compress_time_pub",
+    "encryption_time_pub",
+    "hash_time_pub",
+    "subscribe_time_sub",
+    "hash_time_sub",
+    "decryption_time_sub",
+    "decompress_time_sub",
+    "msize_sub"
+  ],
+  "cat_cols": [
+    "environment",
+    "encryption_type",
+    "compress_method",
+    "hash_mode"
+  ],
+  "target": "total_time",
+  "feature_defaults": {
+    "data_size_pub": 512.0,
+    "pub_ping": 0.228527021408081,
+    "sub_ping": 0.1923197031021118,
+    "compress_time_pub": 0.0007254999945871,
+    "encryption_time_pub": 9.070002124644816e-05,
+    "hash_time_pub": 0.0,
+    "subscribe_time_sub": 1760681163.573049,
+    "hash_time_sub": 0.0,
+    "decryption_time_sub": 8.50000069476664e-05,
+    "decompress_time_sub": 0.0001123000402003,
+    "msize_sub": 680.0
+  },
+  "candidates": {
+    "environment": [
+      "cpc",
+      "cpk",
+      "lrk",
+      "rpc",
+      "rpk"
+    ],
+    "encryption_type": [
+      "none",
+      "aes-gcm",
+      "ascon",
+      "chacha20-poly1305"
+    ],
+    "compress_method": [
+      "none",
+      "bz2",
+      "gzip",
+      "lz4",
+      "lzma",
+      "snappy",
+      "zlib"
+    ],
+    "hash_mode": [
+      "none",
+      "hash"
+    ]
+  },
+  "train_ranges": {
+    "pub_ping_min": 0.0056371688842773,
+    "pub_ping_max": 1516.054,
+    "data_size_pub_min": 8.0,
+    "data_size_pub_max": 524288.0
+  },
+  "versions": {
+    "python": "3.13.0",
+    "pandas": "3.0.2",
+    "numpy": "2.3.1",
+    "sklearn": "1.7.1",
+    "xgboost": "3.1.1"
+  }
+}

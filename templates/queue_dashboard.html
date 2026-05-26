@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Queue Monitor Dashboard</title>
+
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+
+    <style>
+        .queue-metric-box {
+            background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px;
+            text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .queue-metric-title { font-size: 14px; color: #6b7280; font-weight: bold; margin-bottom: 10px; }
+        .queue-metric-value { font-size: 32px; font-weight: bold; color: #1f2937; }
+        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }
+        
+        .status-danger { color: #ef4444; }
+        .status-warning { color: #f59e0b; }
+        .status-good { color: #10b981; }
+    </style>
+</head>
+
+<body>
+<div class="layout">
+
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+        
+        <div class="info-box">
+            <h3>Queue Overview</h3>
+            <p style="font-size: 13px; color: #4b5563;">서버의 MQTT 메시지 큐 백로그, 지연 속도, 토픽별 초당 인입량(Rate)을 모니터링합니다.</p>
+        </div>
+        
+        <div class="info-box">
+            <h3>새로고침</h3>
+            <select id="refreshInterval" onchange="updateInterval()">
+                <option value="1000">1초</option>
+                <option value="3000" selected>3초</option>
+                <option value="5000">5초</option>
+            </select>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>Queue-aware MQTT Monitoring</h2>
+            <div>실시간 큐 백로그 및 처리 지연율 현황</div>
+        </div>
+
+        <section class="dashboard-section">
+            <div class="grid-4">
+                <div class="queue-metric-box">
+                    <div class="queue-metric-title">Queue Backlog</div>
+                    <div class="queue-metric-value" id="valBacklog">0</div>
+                </div>
+                <div class="queue-metric-box">
+                    <div class="queue-metric-title">Subscriber Load</div>
+                    <div class="queue-metric-value" id="valLoad">0%</div>
+                </div>
+                <div class="queue-metric-box">
+                    <div class="queue-metric-title">Avg Processing Delay</div>
+                    <div class="queue-metric-value" id="valDelay">0 ms</div>
+                </div>
+                <div class="queue-metric-box">
+                    <div class="queue-metric-title">Dropped Messages</div>
+                    <div class="queue-metric-value" id="valDropped">0</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Topic Message Rate</h3>
+                    <p>토픽별 초당 인입 속도 (최근 5초 평균)</p>
+                </div>
+            </div>
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Topic</th>
+                        <th>Rate (msgs/sec)</th>
+                    </tr>
+                    </thead>
+                    <tbody id="topicRateTable">
+                    <tr><td colspan="2">데이터를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<script>
+    let timer = null;
+
+    async function fetchQueueStats() {
+        try {
+            const res = await fetch("/api/queue-stats");
+            if (!res.ok) throw new Error("Failed to fetch queue stats");
+            const data = await res.json();
+            
+            document.getElementById("valBacklog").textContent = data.backlog;
+            
+            const loadEl = document.getElementById("valLoad");
+            loadEl.textContent = data.subscriber_load_percent + "%";
+            if (data.subscriber_load_percent > 80) loadEl.className = "queue-metric-value status-danger";
+            else if (data.subscriber_load_percent > 50) loadEl.className = "queue-metric-value status-warning";
+            else loadEl.className = "queue-metric-value status-good";
+            
+            document.getElementById("valDelay").textContent = data.avg_processing_delay_ms + " ms";
+            document.getElementById("valDropped").textContent = data.dropped;
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function fetchTopicRate() {
+        try {
+            const res = await fetch("/api/topic-rate");
+            if (!res.ok) throw new Error("Failed to fetch topic rate");
+            const data = await res.json();
+            
+            const tbody = document.getElementById("topicRateTable");
+            tbody.innerHTML = "";
+            
+            if (data.length === 0) {
+                tbody.innerHTML = "<tr><td colspan='2'>현재 수신 중인 토픽이 없습니다.</td></tr>";
+                return;
+            }
+            
+            data.forEach(row => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td>${row.topic}</td>
+                    <td><strong style="color:#0ea5e9">${row.rate}</strong></td>
+                `;
+                tbody.appendChild(tr);
+            });
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    function refreshAll() {
+        fetchQueueStats();
+        fetchTopicRate();
+    }
+
+    function updateInterval() {
+        if (timer) clearInterval(timer);
+        const ms = parseInt(document.getElementById("refreshInterval").value);
+        timer = setInterval(refreshAll, ms);
+        refreshAll();
+    }
+
+    window.onload = () => {
+        updateInterval();
+    };
+</script>
+</body>
+</html>

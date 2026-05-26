@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.log
+*.err.log
+*.out.log
+iot_data.db*
+Include/
+Lib/
+Scripts/
+pyvenv.cfg
+.git/
+.pytest_cache/
+.docker-cli-config/
+experiment_results/
+iot.zip

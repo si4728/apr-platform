@@ -1,0 +1,46 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual Environment
+Lib/
+Scripts/
+Include/
+venv/
+.env
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# Experiment outputs
+experiment_results/
+
+# Docker local config
+.docker-cli-config/
+
+# VSCode
+.vscode/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Python build
+build/
+dist/
+*.egg-info/
+
+# Zip
+*.zip
+
+pyvenv.cfg
+*.joblib
+*.pkl
+*.pickle
+.python_packages/
+apr_gateway/.python_packages/

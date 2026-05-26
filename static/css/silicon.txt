@@ -1,0 +1,21 @@
+
+직접 Docker 명령으로 실행하려면:
+cd C:\access\iot
+docker compose up -d --build
+
+접속 주소:
+http://localhost:5000
+
+상태 확인:
+docker ps
+docker logs -f iot-dashboard
+
+중지:
+docker stop iot-dashboard
+
+완전히 내리기:
+cd C:\access\iot
+docker compose down
+
+코드를 수정한 뒤 다시 반영하려면 항상:
+docker compose up -d --build

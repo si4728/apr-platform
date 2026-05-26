@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+    <meta charset="UTF-8">
+
+    <title>
+        Sensor Configuration
+    </title>
+
+    <link rel="stylesheet"
+          href="/static/css/dashboard_common.css">
+
+    <script src="/static/js/common_menu.js"></script>
+
+    <script src="/static/js/sensor_config.js?v=2"
+            defer>
+    </script>
+
+</head>
+
+<body>
+
+<div class="layout">
+
+    <!-- LEFT -->
+    <aside class="sidebar">
+
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+
+        <div class="info-box">
+
+            <h3>
+                설정 정보
+            </h3>
+
+            <div class="info-item">
+
+                <span class="info-label">
+                    Config File
+                </span>
+
+                <br>
+
+                config.json
+
+            </div>
+
+            <div class="info-item">
+
+                <span class="info-label">
+                    Dynamic Reload
+                </span>
+
+                <br>
+
+                <span class="status-ok">
+                    ENABLED
+                </span>
+
+            </div>
+
+            <div class="info-item">
+
+                <span class="info-label">
+                    Payload Storage Rule
+                </span>
+
+                <br>
+
+                Defined Sensor → sensor_data<br>
+                Undefined Payload → unknown_payload_data
+
+            </div>
+
+            <div class="info-item">
+
+                <span class="info-label">
+                    Graph Color Rule
+                </span>
+
+                <br>
+
+                High: Red /
+                Normal: Green /
+                Low: Yellow
+
+            </div>
+
+        </div>
+
+    </aside>
+
+    <!-- RIGHT -->
+    <main class="main">
+
+        <div class="main-header">
+
+            <h2>
+                Sensor Configuration
+            </h2>
+
+            <div>
+                센서 추가 / 수정 / 삭제, payload schema mode 및 그래프 색상 기준 설정
+            </div>
+
+        </div>
+
+        <!-- METADATA & VERIFICATION INFO -->
+        <div class="config-panel" style="background:#f0fdf4; border-left:4px solid #16a34a; padding:15px; border-radius:8px; margin-bottom:20px;">
+            <h3 style="margin-top:0; color:#166534;">실험 메타데이터 및 검증 기준 (Experiment Metadata & Criteria)</h3>
+            <p style="font-size:13px; color:#166534; line-height:1.6; margin-bottom:0;">
+                <strong>1. Payload Schema Mode:</strong> 데이터 형식을 정의합니다. 지정된 Schema에 부합하지 않거나, 식별되지 않는 필드가 있는 데이터는 <strong>Unknown Payload</strong>로 분류되어 별도로 적재됩니다.<br>
+                <strong>2. QOS & Latency Validation:</strong> 실험 단계(Phase 1, 2)에서 발행된 데이터는 Timestamp를 기준으로 E2E Latency가 측정되며, Seq(시퀀스)를 통해 패킷 유실률을 검증합니다.<br>
+                <strong>3. 색상 검증 기준:</strong> 그래프의 상태값은 센서별 Color Rule에 따라 분류되며, 규칙이 없으면 평균의 ±15% 범위를 Normal(정상)로 간주합니다.
+            </p>
+        </div>
+
+        <!-- CONFIG -->
+        <div class="config-panel">
+
+            <h3>
+                기본 센서 정보
+            </h3>
+
+            <div class="form-row">
+
+                <input id="sensorId"
+                       placeholder="sensor id">
+
+                <!-- TYPE SELECT -->
+                <div style="flex:1; display:flex; gap:5px;">
+
+                    <select id="sensorType">
+                    </select>
+
+                    <button onclick="openTypeModal()">
+                        +
+                    </button>
+
+                </div>
+
+                <input id="sensorUnit"
+                       placeholder="unit">
+
+            </div>
+
+            <div class="form-row">
+
+                <!-- TOPIC 자동 -->
+                <input id="sensorTopic"
+                       placeholder="topic"
+                       readonly>
+
+                <select id="payloadSchemaMode"
+                        title="payload schema mode"
+                        style="flex: 1;">
+                    <option value="defined_sensor" selected>defined_sensor</option>
+                    <option value="flexible_json">flexible_json</option>
+                    <option value="raw_payload">raw_payload</option>
+                    <option value="binary_payload">binary_payload</option>
+                </select>
+
+                <select id="sensorPolicy"
+                        title="sensor policy"
+                        style="flex: 1; background: #e0f2fe; border: 1px solid #bae6fd; font-weight: bold; color: #0369a1;">
+                    <option value="none" selected>none (기본)</option>
+                    <option value="apr">apr (ML 추천)</option>
+                </select>
+
+            </div>
+
+            <div style="font-size:13px; margin-bottom:10px; color:#555;">
+                defined_sensor는 sensor_data에 저장되는 표준 payload입니다. flexible_json/raw_payload/binary_payload는 실제 수신 시 schema가 다르면 unknown_payload_data에 별도 저장됩니다.
+            </div>
+
+            <div class="form-row">
+
+                <input id="sensorMin"
+                       type="number"
+                       placeholder="min">
+
+                <input id="sensorMax"
+                       type="number"
+                       placeholder="max">
+
+                <input id="sensorStart"
+                       type="number"
+                       placeholder="start">
+
+                <input id="sensorStep"
+                       type="number"
+                       placeholder="step">
+
+                <input id="sensorInterval"
+                       type="number"
+                       placeholder="interval">
+
+                <select id="sensorMode">
+
+                    <option value="random_walk">
+                        random_walk
+                    </option>
+
+                    <option value="random">
+                        random
+                    </option>
+
+                </select>
+
+            </div>
+
+            <h3>
+                그래프 색상 구간 설정
+            </h3>
+
+            <div style="font-size:13px; margin-bottom:10px;">
+                입력값이 없으면 그래프 데이터 평균 기준 ±15% 범위를 일반으로 자동 판단합니다.
+            </div>
+
+            <div class="form-row">
+
+                <input id="sensorLowMax"
+                       type="number"
+                       placeholder="낮음 최대값">
+
+                <input id="sensorNormalMin"
+                       type="number"
+                       placeholder="일반 최소값">
+
+                <input id="sensorNormalMax"
+                       type="number"
+                       placeholder="일반 최대값">
+
+                <input id="sensorHighMin"
+                       type="number"
+                       placeholder="높음 최소값">
+
+            </div>
+
+            <div class="button-row">
+
+                <button onclick="addSensor()">
+                    센서 추가
+                </button>
+
+                <button onclick="updateSensor()">
+                    센서 수정
+                </button>
+
+                <button onclick="deleteSensor()">
+                    센서 삭제
+                </button>
+
+                <button onclick="clearForm()">
+                    입력 초기화
+                </button>
+
+            </div>
+
+        </div>
+
+        <!-- TABLE -->
+        <div class="table-panel">
+
+            <table>
+
+                <thead>
+
+                <tr>
+
+                    <th>ID</th>
+                    <th>Type</th>
+                    <th>Unit</th>
+                    <th>Topic</th>
+                    <th>Schema Mode</th>
+                    <th>Policy</th>
+                    <th>Range</th>
+                    <th>Low</th>
+                    <th>Normal</th>
+                    <th>High</th>
+                    <th>Start</th>
+                    <th>Step</th>
+                    <th>Mode</th>
+                    <th>Interval</th>
+
+                </tr>
+
+                </thead>
+
+                <tbody id="sensorConfigTable">
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </main>
+
+</div>
+
+<!-- TYPE MODAL -->
+<div id="typeModal"
+     class="modal">
+
+    <div class="modal-content">
+
+        <h3>
+            신규 Sensor Type 추가
+        </h3>
+
+        <input id="newTypeName"
+               placeholder="type name">
+
+        <div style="margin-top:15px;">
+
+            <button onclick="addNewType()">
+                추가
+            </button>
+
+            <button onclick="closeTypeModal()">
+                닫기
+            </button>
+
+        </div>
+
+    </div>
+
+</div>
+
+</body>
+</html>

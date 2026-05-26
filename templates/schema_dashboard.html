@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Schema Intelligence & Clustering</title>
+
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+    
+    <style>
+        .cluster-card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        .cluster-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #3b82f6; padding-bottom: 10px; margin-bottom: 15px; }
+        .cluster-title { font-size: 18px; font-weight: bold; color: #1e3a8a; }
+        .cluster-count { background: #dbeafe; color: #1e40af; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+        
+        .schema-badge { display: inline-block; background: #f3f4f6; color: #374151; font-family: monospace; font-size: 11px; padding: 2px 6px; border-radius: 4px; margin: 3px; border: 1px solid #e5e7eb; }
+        .schema-block { background: #f9fafb; padding: 15px; border-radius: 6px; border: 1px dashed #d1d5db; margin-top: 10px; }
+    </style>
+</head>
+
+<body>
+<div class="layout">
+
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+        
+        <div class="info-box">
+            <h3>Schema Clustering</h3>
+            <p style="font-size: 13px; color: #4b5563;">Jaccard Similarity계수를 사용하여 실시간으로 비정형/미정의 수신 메시지의 스키마 구조적 거리값을 분석하여 유사 스키마 단위로 군집화합니다.</p>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>Unknown Schema Clustering & Profiling</h2>
+            <div>미정의 실시간 유입 스키마 구조적 지능 분류 모니터</div>
+        </div>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <h3>Jaccard Similarity Clustered Groups (유사도 분류군)</h3>
+                <button onclick="fetchClusters()" style="padding:6px 12px; background:#2563eb; color:white; border:none; border-radius:4px; cursor:pointer;">실시간 갱신</button>
+            </div>
+            
+            <div id="clustersContainer">
+                <p>스키마 군집 정보를 불러오고 있습니다...</p>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<script>
+    async function fetchClusters() {
+        try {
+            const res = await fetch("/api/schema-clusters");
+            if (!res.ok) throw new Error("Failed to fetch clusters");
+            const data = await res.json();
+            
+            const container = document.getElementById("clustersContainer");
+            container.innerHTML = "";
+            
+            if (data.length === 0) {
+                container.innerHTML = "<p style='color:#6b7280;'>현재 생성된 미정의 스키마 분석 군집이 없습니다.</p>";
+                return;
+            }
+            
+            data.forEach(cluster => {
+                const card = document.createElement("div");
+                card.className = "cluster-card";
+                
+                let schemasHtml = "";
+                cluster.schemas.forEach(sc => {
+                    const keysBadges = sc.keys.map(k => `<span class="schema-badge">${k}</span>`).join(" ");
+                    schemasHtml += `
+                        <div class="schema-block">
+                            <div style="font-weight:bold; margin-bottom:5px; color:#4b5563;">
+                                Schema Fingerprint Hash: <span style="color:#2563eb; font-family:monospace;">${sc.schema_hash}</span> 
+                                <span style="font-size:12px; color:#6b7280; font-weight:normal; margin-left:10px;">수신 메시지 수: ${sc.message_count}건</span>
+                            </div>
+                            <div>${keysBadges}</div>
+                        </div>
+                    `;
+                });
+                
+                card.innerHTML = `
+                    <div class="cluster-header">
+                        <span class="cluster-title">Group: ${cluster.cluster_id}</span>
+                        <span class="cluster-count">포함 스키마 종류: ${cluster.schemas.length}종</span>
+                    </div>
+                    ${schemasHtml}
+                `;
+                container.appendChild(card);
+            });
+        } catch (err) {
+            console.error(err);
+        }
+    }
+    
+    window.onload = () => {
+        fetchClusters();
+    };
+</script>
+</body>
+</html>

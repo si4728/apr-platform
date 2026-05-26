@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>All Sensor Dashboard</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+
+    <script>
+        const pageMode = "multi";
+    </script>
+
+    <script src="/static/js/dashboard_common.js" defer></script>
+</head>
+
+<body>
+<div class="layout">
+
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+
+        <div class="info-box">
+            <h3>시스템 상태</h3>
+
+            <div class="info-item">
+                <span class="info-label">MQTT Broker</span><br>
+                <span id="brokerInfo">-</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Topic Prefix</span><br>
+                <span id="topicPrefix">-</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Sensor Count</span><br>
+                <span id="sensorCount">0</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Dashboard Status</span><br>
+                <span class="status-ok">RUNNING</span>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <h3>표시 설정</h3>
+
+            <div class="control-panel">
+                <label>
+                    최근 데이터
+                    <select id="dataLimit">
+                        <option value="30">30개</option>
+                        <option value="50" selected>50개</option>
+                        <option value="100">100개</option>
+                        <option value="200">200개</option>
+                    </select>
+                </label>
+
+                <label>
+                    시간 표시 간격
+                    <select id="tickInterval">
+                        <option value="1">1개마다</option>
+                        <option value="5" selected>5개마다</option>
+                        <option value="10">10개마다</option>
+                    </select>
+                </label>
+
+                <label>
+                    자동 갱신
+                    <select id="refreshInterval">
+                        <option value="1000">1초</option>
+                        <option value="3000" selected>3초</option>
+                        <option value="5000">5초</option>
+                        <option value="10000">10초</option>
+                    </select>
+                </label>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <h3>센서 목록</h3>
+            <div id="sensorList">-</div>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>All Sensor Multi Panel Dashboard</h2>
+            <div>전체 센서 데이터와 topic별 payload 수신 통계를 함께 표시합니다.</div>
+        </div>
+
+        <div id="multiCharts" class="multi-chart-grid"></div>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Publisher Payload Metadata</h3>
+                    <p>발행자(Publisher)가 전송하는 센서 데이터의 기본 메타데이터 구조 기준입니다. 이 스키마에 부합하지 않는 데이터는 Unknown으로 분류됩니다.</p>
+                </div>
+                <span class="badge badge-info">metadata</span>
+            </div>
+            <div style="background:#f9fafb; border:1px solid #e5e7eb; padding:15px; border-radius:8px; margin-bottom:10px;">
+                <ul style="margin:0; padding-left:20px; font-size:13px; color:#374151; line-height:1.6;">
+                    <li><strong>topic</strong>: MQTT 발행 토픽 (예: iot/sensor/temp_001)</li>
+                    <li><strong>sensor_id</strong>: 센서 고유 식별자</li>
+                    <li><strong>payload_type</strong>: 데이터 유형 (defined_sensor, flexible_json 등)</li>
+                    <li><strong>timestamp</strong>: 데이터 발생 시각 (네트워크 지연 측정용)</li>
+                    <li><strong>seq</strong>: 메시지 시퀀스 번호 (누락/순서 역전 확인용)</li>
+                    <li><strong>data</strong>: 실제 센서 측정값 (숫자 또는 JSON 객체)</li>
+                </ul>
+            </div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Topic Traffic Summary</h3>
+                    <p>정의된 센서 데이터와 미정의 payload를 모두 포함한 topic 기준 수신 통계입니다.</p>
+                </div>
+                <span class="badge badge-info">topic-based</span>
+            </div>
+
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Topic</th>
+                        <th>Payload Type</th>
+                        <th>Count</th>
+                        <th>Total Bytes</th>
+                        <th>Total KB</th>
+                        <th>First Received</th>
+                        <th>Last Received</th>
+                    </tr>
+                    </thead>
+                    <tbody id="topicStatsTable">
+                    <tr><td colspan="7">데이터를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Unknown Payload Ranking</h3>
+                    <p>사전에 정의되지 않은 payload가 많이 들어오는 topic을 우선 확인합니다.</p>
+                </div>
+                <span class="badge badge-warning">unknown</span>
+            </div>
+
+            <div class="summary-cards">
+                <div class="summary-card">
+                    <span>Unknown Topics</span>
+                    <strong id="unknownTopicCount">0</strong>
+                </div>
+                <div class="summary-card">
+                    <span>Unknown Messages</span>
+                    <strong id="unknownMessageCount">0</strong>
+                </div>
+                <div class="summary-card">
+                    <span>Total Payload KB</span>
+                    <strong id="unknownTotalKb">0</strong>
+                </div>
+            </div>
+
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Topic</th>
+                        <th>Payload Type</th>
+                        <th>Count</th>
+                        <th>Total Bytes</th>
+                        <th>Total KB</th>
+                        <th>Avg Bytes</th>
+                        <th>Last Received</th>
+                    </tr>
+                    </thead>
+                    <tbody id="unknownTopicStatsTable">
+                    <tr><td colspan="7">데이터를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Unknown Schema Fingerprint</h3>
+                    <p>수신된 미정의 payload의 구조(스키마)를 분석하여 유사한 데이터 패턴(Fingerprint)별로 그룹화합니다.</p>
+                </div>
+                <span class="badge badge-warning">fingerprint</span>
+            </div>
+
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Fingerprint Hash</th>
+                        <th>Fields Detected</th>
+                        <th>Count</th>
+                        <th>First Seen</th>
+                        <th>Last Seen</th>
+                    </tr>
+                    </thead>
+                    <tbody id="schemaFingerprintTable">
+                    <tr><td colspan="5">데이터를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="dashboard-section" id="experiment-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Phase 1 & 2: E2E Latency & QoS Statistics</h3>
+                    <p>mqtt_experiment_log 기준으로 topic 및 policy 조합별 평균, p95, p99 latency 및 실험 메타데이터를 표시합니다.</p>
+                </div>
+                <span class="badge badge-info">phase-1</span>
+            </div>
+
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Topic</th>
+                        <th>QoS</th>
+                        <th>Compression</th>
+                        <th>Encryption</th>
+                        <th>Integrity</th>
+                        <th>Count</th>
+                        <th>Avg</th>
+                        <th>P95</th>
+                        <th>P99</th>
+                        <th>Max</th>
+                        <th>Avg Payload</th>
+                    </tr>
+                    </thead>
+                    <tbody id="latencyStatsTable">
+                    <tr><td colspan="11">데이터를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Recent Experiment Log</h3>
+                    <p>최근 수신된 운영/실험 payload의 수신 시각, sequence, latency, policy 정보를 확인합니다.</p>
+                </div>
+                <span class="badge badge-warning">experiment-log</span>
+            </div>
+
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Received</th>
+                        <th>Experiment</th>
+                        <th>Topic</th>
+                        <th>Sensor</th>
+                        <th>Seq</th>
+                        <th>Latency</th>
+                        <th>Payload</th>
+                        <th>QoS</th>
+                        <th>Compression</th>
+                        <th>Encryption</th>
+                        <th>Integrity</th>
+                        <th>Schema</th>
+                    </tr>
+                    </thead>
+                    <tbody id="experimentLogTable">
+                    <tr><td colspan="12">데이터를 불러오는 중입니다.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
+
+</div>
+</body>
+</html>
