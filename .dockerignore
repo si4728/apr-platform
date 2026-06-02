@@ -3,7 +3,10 @@ __pycache__/
 *.log
 *.err.log
 *.out.log
-iot_data.db*
+*.db
+*.db-*
+*.db.*
+*.bak
 Include/
 Lib/
 Scripts/
@@ -11,5 +14,9 @@ pyvenv.cfg
 .git/
 .pytest_cache/
 .docker-cli-config/
+docs/
+20260513/
+20260515/
+iot-platform/
 experiment_results/
-iot.zip
+*.zip

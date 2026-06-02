@@ -4,6 +4,7 @@ import threading
 import time
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -105,10 +106,16 @@ class DBManager:
         return stats
         
     def _worker(self):
-        conn = sqlite3.connect(self.db_name, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
+        busy_timeout_ms = int(os.environ.get("DB_BUSY_TIMEOUT_MS", "30000"))
+        conn = sqlite3.connect(
+            self.db_name,
+            timeout=busy_timeout_ms / 1000,
+            check_same_thread=False
+        )
+        journal_mode = os.environ.get("DB_JOURNAL_MODE", "WAL").upper()
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         last_flush = time.time()
         buffer = []
         
@@ -130,33 +137,46 @@ class DBManager:
         conn.close()
 
     def _flush_buffer(self, conn, buffer):
-        cur = conn.cursor()
         started_at = time.time()
-        try:
-            cur.execute("BEGIN TRANSACTION")
-            for task_type, args in buffer:
-                if task_type == "sensor_data":
-                    self._execute_sensor_data(cur, args)
-                elif task_type == "unknown_payload":
-                    self._execute_unknown_payload(cur, args)
-                elif task_type == "experiment_log":
-                    self._execute_experiment_log(cur, args)
-                elif task_type == "schema_profile":
-                    self._execute_schema_profile(cur, args)
-            conn.commit()
-            duration_ms = round((time.time() - started_at) * 1000, 3)
-            with self.lock:
-                self.stats["committed"] += len(buffer)
-                self.stats["flush_count"] += 1
-                self.stats["last_flush_size"] = len(buffer)
-                self.stats["last_flush_duration_ms"] = duration_ms
-                self.stats["last_error"] = None
-        except Exception as e:
-            conn.rollback()
-            with self.lock:
-                self.stats["failed"] += len(buffer)
-                self.stats["last_error"] = str(e)
-            logger.error(f"Failed to commit DB transaction: {e}")
+        max_retries = int(os.environ.get("DB_LOCK_RETRIES", "5"))
+        for attempt in range(max_retries + 1):
+            cur = conn.cursor()
+            try:
+                cur.execute("BEGIN TRANSACTION")
+                for task_type, args in buffer:
+                    if task_type == "sensor_data":
+                        self._execute_sensor_data(cur, args)
+                    elif task_type == "unknown_payload":
+                        self._execute_unknown_payload(cur, args)
+                    elif task_type == "experiment_log":
+                        self._execute_experiment_log(cur, args)
+                    elif task_type == "schema_profile":
+                        self._execute_schema_profile(cur, args)
+                conn.commit()
+                duration_ms = round((time.time() - started_at) * 1000, 3)
+                with self.lock:
+                    self.stats["committed"] += len(buffer)
+                    self.stats["flush_count"] += 1
+                    self.stats["last_flush_size"] = len(buffer)
+                    self.stats["last_flush_duration_ms"] = duration_ms
+                    self.stats["last_error"] = None
+                return
+            except sqlite3.OperationalError as e:
+                conn.rollback()
+                if "locked" not in str(e).lower() or attempt >= max_retries:
+                    self._record_failed_flush(buffer, e)
+                    return
+                time.sleep(0.05 * (attempt + 1))
+            except Exception as e:
+                conn.rollback()
+                self._record_failed_flush(buffer, e)
+                return
+
+    def _record_failed_flush(self, buffer, error):
+        with self.lock:
+            self.stats["failed"] += len(buffer)
+            self.stats["last_error"] = str(error)
+        logger.error(f"Failed to commit DB transaction: {error}")
 
     def _execute_sensor_data(self, cur, args):
         data, meta = args

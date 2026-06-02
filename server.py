@@ -6,6 +6,9 @@ import time
 import threading
 import html
 import os
+import atexit
+import socket
+import uuid
 from datetime import datetime, timezone, timedelta
 import paho.mqtt.client as mqtt
 
@@ -56,10 +59,20 @@ apr_auto_evaluation_inflight = set()
 
 app = Flask(__name__)
 
-DB_NAME = "iot_data.db"
+DB_NAME = os.environ.get("DB_NAME", "iot_data.db")
+DB_JOURNAL_MODE = os.environ.get("DB_JOURNAL_MODE", "WAL").upper()
+DB_BUSY_TIMEOUT_MS = int(os.environ.get("DB_BUSY_TIMEOUT_MS", "30000"))
+SYSTEM_MODE = os.environ.get("SYSTEM_MODE", "windows")
+SYSTEM_LOCK_FILE = os.environ.get("SYSTEM_LOCK_FILE", os.path.join("runtime", "iot_dashboard.lock"))
+SYSTEM_LOCK_STALE_SECONDS = int(os.environ.get("SYSTEM_LOCK_STALE_SECONDS", "30"))
 CONFIG_FILE = "config.json"
 POLICY_TOPIC_PREFIX = "iot/sensor/policy/"
 KST = timezone(timedelta(hours=9))
+system_owner_id = str(uuid.uuid4())
+system_lock_active = False
+system_lock_stop_event = threading.Event()
+system_lock_thread = None
+mqtt_client = None
 
 # 사전에 정의된 센서 데이터로 인정할 최소 필드
 DEFINED_SENSOR_REQUIRED_FIELDS = {
@@ -72,6 +85,107 @@ DEFINED_SENSOR_REQUIRED_FIELDS = {
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def get_system_identity():
+    return {
+        "owner_id": system_owner_id,
+        "mode": SYSTEM_MODE,
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "db_name": DB_NAME,
+        "started_at": getattr(get_system_identity, "started_at", now_iso()),
+        "heartbeat_at": now_iso(),
+    }
+
+
+get_system_identity.started_at = now_iso()
+
+
+def read_system_lock():
+    try:
+        with open(SYSTEM_LOCK_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return {"raw": "unreadable"}
+
+
+def lock_is_stale(lock_data):
+    heartbeat = lock_data.get("heartbeat_at") if isinstance(lock_data, dict) else None
+    dt = parse_iso_datetime(heartbeat)
+    if not dt:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() > SYSTEM_LOCK_STALE_SECONDS
+
+
+def write_system_lock():
+    lock_dir = os.path.dirname(SYSTEM_LOCK_FILE)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+    tmp_path = f"{SYSTEM_LOCK_FILE}.{system_owner_id}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(get_system_identity(), f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, SYSTEM_LOCK_FILE)
+
+
+def acquire_system_lock():
+    global system_lock_active, system_lock_thread
+    lock_dir = os.path.dirname(SYSTEM_LOCK_FILE)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+
+    existing = read_system_lock()
+    if existing and not lock_is_stale(existing):
+        raise RuntimeError(
+            "Another system instance is already using the shared DB: "
+            f"{existing}"
+        )
+
+    write_system_lock()
+    system_lock_active = True
+    system_lock_stop_event.clear()
+    system_lock_thread = threading.Thread(target=system_lock_heartbeat, daemon=True)
+    system_lock_thread.start()
+    atexit.register(release_system_lock)
+
+
+def system_lock_heartbeat():
+    while not system_lock_stop_event.wait(5):
+        if system_lock_active:
+            write_system_lock()
+
+
+def release_system_lock():
+    global system_lock_active
+    if not system_lock_active:
+        return
+    system_lock_stop_event.set()
+    current = read_system_lock()
+    if isinstance(current, dict) and current.get("owner_id") == system_owner_id:
+        try:
+            os.remove(SYSTEM_LOCK_FILE)
+        except FileNotFoundError:
+            pass
+    system_lock_active = False
+
+
+def graceful_shutdown(exit_process=False):
+    global mqtt_client
+    try:
+        if mqtt_client:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+    finally:
+        mqtt_client = None
+    if db_manager:
+        db_manager.stop()
+    release_system_lock()
+    if exit_process:
+        os._exit(0)
 
 
 def parse_iso_datetime(value):
@@ -107,6 +221,86 @@ def calc_latency_seconds(publish_timestamp, received_timestamp):
         if recv_dt.tzinfo is not None:
             recv_dt = recv_dt.replace(tzinfo=None)
         return round((recv_dt - pub_dt).total_seconds(), 6)
+
+
+def seconds_since_iso(value):
+    dt = parse_iso_datetime(value)
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds())
+
+
+def calculate_collection_timing(cur, sensor_id, sensor_type=None, window=200, late_multiplier=2.0, min_samples=5):
+    if sensor_type is None:
+        cur.execute("""
+            SELECT COALESCE(received_timestamp, timestamp)
+            FROM sensor_data
+            WHERE sensor_id = ?
+              AND COALESCE(received_timestamp, timestamp) IS NOT NULL
+            ORDER BY id DESC
+            LIMIT ?
+        """, (sensor_id, window))
+    else:
+        cur.execute("""
+            SELECT COALESCE(received_timestamp, timestamp)
+            FROM sensor_data
+            WHERE sensor_id = ?
+              AND sensor_type = ?
+              AND COALESCE(received_timestamp, timestamp) IS NOT NULL
+            ORDER BY id DESC
+            LIMIT ?
+        """, (sensor_id, sensor_type, window))
+
+    timestamps = []
+    for row in cur.fetchall():
+        dt = parse_iso_datetime(row[0])
+        if not dt:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        timestamps.append(dt.astimezone(timezone.utc))
+
+    if not timestamps:
+        return {
+            "collection_status": "NO_DATA",
+            "collection_warning": False,
+            "last_received_at": None,
+            "elapsed_since_last_seconds": None,
+            "avg_collection_interval_seconds": None,
+            "collection_warning_threshold_seconds": None,
+            "collection_sample_count": 0,
+        }
+
+    gaps = []
+    for newer, older in zip(timestamps, timestamps[1:]):
+        gap = (newer - older).total_seconds()
+        if gap >= 0:
+            gaps.append(gap)
+
+    avg_interval = round(sum(gaps) / len(gaps), 3) if gaps else None
+    elapsed = round(seconds_since_iso(timestamps[0].isoformat()), 3)
+    threshold = round(avg_interval * late_multiplier, 3) if avg_interval is not None else None
+    has_enough_samples = len(gaps) >= max(1, min_samples - 1)
+    warning = bool(has_enough_samples and threshold is not None and elapsed > threshold)
+
+    if warning:
+        status = "LATE"
+    elif not has_enough_samples:
+        status = "INSUFFICIENT_SAMPLES"
+    else:
+        status = "OK"
+
+    return {
+        "collection_status": status,
+        "collection_warning": warning,
+        "last_received_at": timestamps[0].isoformat(),
+        "elapsed_since_last_seconds": elapsed,
+        "avg_collection_interval_seconds": avg_interval,
+        "collection_warning_threshold_seconds": threshold,
+        "collection_sample_count": len(timestamps),
+    }
 
 
 def load_config():
@@ -146,7 +340,12 @@ def get_platform_runtime_config():
 
 
 def get_db_connection():
-    return sqlite3.connect(DB_NAME)
+    db_dir = os.path.dirname(DB_NAME)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(DB_NAME, timeout=DB_BUSY_TIMEOUT_MS / 1000)
+    conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+    return conn
 
 
 def get_db_writer_stats():
@@ -220,7 +419,7 @@ def add_column_if_missing(cur, table_name, column_name, column_type):
 
 def init_db():
     conn = get_db_connection()
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA journal_mode={DB_JOURNAL_MODE}")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     cur = conn.cursor()
@@ -1152,6 +1351,26 @@ def api_db_status():
     return jsonify(get_database_stats())
 
 
+@app.route("/api/system/status")
+def api_system_status():
+    return jsonify({
+        "current": get_system_identity(),
+        "lock_file": SYSTEM_LOCK_FILE,
+        "lock_active": system_lock_active,
+        "lock": read_system_lock(),
+        "db_writer": get_db_writer_stats(),
+    })
+
+
+@app.route("/api/system/shutdown", methods=["POST"])
+def api_system_shutdown():
+    threading.Thread(target=lambda: (time.sleep(0.5), graceful_shutdown(True)), daemon=True).start()
+    return jsonify({
+        "status": "shutting_down",
+        "message": "MQTT and DB writer will stop; DB lock will be released.",
+    })
+
+
 @app.route("/latency_dashboard")
 def latency_dashboard():
     return render_template("latency_dashboard.html")
@@ -1258,6 +1477,11 @@ def render_markdown_doc(doc_path, title):
 
 @app.route("/api/stats")
 def api_stats():
+    warning_config = load_config().get("platform", {}).get("collection_delay_warning", {})
+    late_multiplier = request.args.get("late_multiplier", default=warning_config.get("late_multiplier", 2.0), type=float)
+    collection_window = request.args.get("collection_window", default=warning_config.get("window", 200), type=int)
+    collection_min_samples = request.args.get("collection_min_samples", default=warning_config.get("min_samples", 5), type=int)
+
     conn = get_db_connection()
     cur = conn.cursor()
 
@@ -1277,10 +1501,17 @@ def api_stats():
     """)
 
     rows = cur.fetchall()
-    conn.close()
-
-    return jsonify([
-        {
+    result = []
+    for r in rows:
+        timing = calculate_collection_timing(
+            cur,
+            r[0],
+            r[1],
+            window=max(10, min(collection_window, 1000)),
+            late_multiplier=max(1.0, late_multiplier),
+            min_samples=max(2, collection_min_samples),
+        )
+        item = {
             "sensor_id": r[0],
             "sensor_type": r[1],
             "count": r[2],
@@ -1290,8 +1521,56 @@ def api_stats():
             "avg_latency": r[6],
             "avg_payload_size": r[7]
         }
-        for r in rows
-    ])
+        item.update(timing)
+        result.append(item)
+    conn.close()
+
+    return jsonify(result)
+
+
+@app.route("/api/collection-warnings")
+def api_collection_warnings():
+    warning_config = load_config().get("platform", {}).get("collection_delay_warning", {})
+    default_enabled = "true" if warning_config.get("enabled", True) else "false"
+    enabled = request.args.get("enabled", default=default_enabled).lower() not in ("0", "false", "no", "off")
+    late_multiplier = request.args.get("late_multiplier", default=warning_config.get("late_multiplier", 2.0), type=float)
+    collection_window = request.args.get("collection_window", default=warning_config.get("window", 200), type=int)
+    collection_min_samples = request.args.get("collection_min_samples", default=warning_config.get("min_samples", 5), type=int)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT sensor_id, sensor_type, COUNT(*)
+        FROM sensor_data
+        WHERE sensor_id IS NOT NULL
+        GROUP BY sensor_id, sensor_type
+        ORDER BY sensor_id
+    """)
+    rows = cur.fetchall()
+
+    result = []
+    for sensor_id, sensor_type, count in rows:
+        timing = calculate_collection_timing(
+            cur,
+            sensor_id,
+            sensor_type,
+            window=max(10, min(collection_window, 1000)),
+            late_multiplier=max(1.0, late_multiplier),
+            min_samples=max(2, collection_min_samples),
+        )
+        timing.update({
+            "enabled": enabled,
+            "sensor_id": sensor_id,
+            "sensor_type": sensor_type,
+            "count": count,
+        })
+        if not enabled and timing["collection_warning"]:
+            timing["collection_status"] = "DISABLED"
+            timing["collection_warning"] = False
+        result.append(timing)
+
+    conn.close()
+    return jsonify(result)
 
 
 @app.route("/api/unknown-topic-stats")
@@ -2227,8 +2506,10 @@ def api_voice_results():
 
 
 if __name__ == "__main__":
+    acquire_system_lock()
     init_db()
     if db_manager:
+        db_manager.db_name = DB_NAME
         db_writer_config = get_platform_runtime_config().get("db_writer", {})
         db_manager.configure(
             batch_size=db_writer_config.get("batch_size"),
@@ -2240,7 +2521,4 @@ if __name__ == "__main__":
     try:
         app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
     finally:
-        mqtt_client.loop_stop()
-        mqtt_client.disconnect()
-        if db_manager:
-            db_manager.stop()
+        graceful_shutdown()

@@ -5,10 +5,17 @@ services:
     working_dir: /app
     environment:
       TZ: Asia/Seoul
+      DB_NAME: /app/iot_data.db
+      DB_JOURNAL_MODE: DELETE
+      DB_LOCK_RETRIES: 10
+      DB_BUSY_TIMEOUT_MS: 30000
+      SYSTEM_MODE: docker
+      SYSTEM_LOCK_FILE: /app/runtime/iot_dashboard.lock
     ports:
       - "5000:5000"
     volumes:
       - ./iot_data.db:/app/iot_data.db
+      - ./runtime:/app/runtime
       - ./config.json:/app/config.json:ro
       - ./experiment_results:/app/experiment_results
     healthcheck:
@@ -17,4 +24,4 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    restart: unless-stopped
+    restart: "no"

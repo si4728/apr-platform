@@ -102,6 +102,39 @@ body.sidebar-collapsed .main {
     font-weight: 700;
 }
 
+.status-warning {
+    color: #f59e0b;
+    font-weight: 700;
+}
+
+.shutdown-button {
+    width: 100%;
+    margin-top: 10px;
+    background: #dc2626;
+    font-weight: 700;
+}
+
+.shutdown-button:hover {
+    background: #b91c1c;
+}
+
+.shutdown-button:disabled {
+    background: #6b7280;
+    cursor: not-allowed;
+}
+
+.shutdown-message {
+    min-height: 18px;
+    margin-top: 8px;
+    color: #cbd5e1;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.shutdown-error {
+    color: #fca5a5;
+}
+
 .control-panel {
     display: flex;
     flex-direction: column;
@@ -328,6 +361,35 @@ th {
 .chart-status-critical {
     color: #dc2626;
     font-weight: 700;
+}
+
+.collection-warning-box {
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.collection-ok {
+    color: #166534;
+    font-weight: 700;
+}
+
+.collection-late {
+    color: #b91c1c;
+    font-weight: 700;
+}
+
+.collection-warning-box.collection-ok {
+    background: #f0fdf4;
+    border-color: #bbf7d0;
+}
+
+.collection-warning-box.collection-late {
+    background: #fef2f2;
+    border-color: #fecaca;
 }
 
 .payload-badge {

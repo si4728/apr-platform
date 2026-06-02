@@ -13,7 +13,7 @@
         const pageMode = "single";
     </script>
 
-    <script src="/static/js/dashboard_common.js" defer></script>
+    <script src="/static/js/dashboard_common.js?v=4" defer></script>
 </head>
 
 <body>
@@ -43,8 +43,13 @@
 
             <div class="info-item">
                 <span class="info-label">Dashboard Status</span><br>
-                <span class="status-ok">RUNNING</span>
+                <span id="dashboardRunStatus" class="status-ok">RUNNING</span>
             </div>
+
+            <button id="systemShutdownBtn" class="shutdown-button" type="button">
+                System Shutdown
+            </button>
+            <div id="systemShutdownMessage" class="shutdown-message"></div>
         </div>
 
         <div class="info-box">
@@ -84,6 +89,24 @@
                         <option value="10000">10초</option>
                     </select>
                 </label>
+
+                <label>
+                    수집 지연 경고
+                    <select id="collectionWarningEnabled">
+                        <option value="true" selected>ON</option>
+                        <option value="false">OFF</option>
+                    </select>
+                </label>
+
+                <label>
+                    지연 기준
+                    <select id="collectionWarningMultiplier">
+                        <option value="1.5">평균 x 1.5</option>
+                        <option value="2" selected>평균 x 2</option>
+                        <option value="3">평균 x 3</option>
+                        <option value="5">평균 x 5</option>
+                    </select>
+                </label>
             </div>
         </div>
 
@@ -100,6 +123,9 @@
         </div>
 
         <div class="single-chart-panel">
+            <div id="singleCollectionWarning" class="collection-warning-box collection-ok">
+                수집 지연 상태: -
+            </div>
             <canvas id="sensorChart"></canvas>
         </div>
 

@@ -11,8 +11,10 @@ venv/
 
 # Database
 *.db
+*.db.*
 *.db-shm
 *.db-wal
+*.bak
 
 # Logs
 *.log
@@ -22,6 +24,7 @@ experiment_results/
 
 # Docker local config
 .docker-cli-config/
+runtime/
 
 # VSCode
 .vscode/

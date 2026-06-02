@@ -9,6 +9,8 @@ let charts = {};
 let singleChart = null;
 let currentSingleSensorId = null;
 let refreshTimer = null;
+let collectionWarnings = {};
+let systemShuttingDown = false;
 
 const sensorAxisRange = {
     "temp_001": {
@@ -57,6 +59,171 @@ function getAverage(values) {
         );
 
     return sum / numericValues.length;
+}
+
+
+function getCollectionWarningOptions() {
+    const enabledObj = document.getElementById("collectionWarningEnabled");
+    const multiplierObj = document.getElementById("collectionWarningMultiplier");
+
+    return {
+        enabled: enabledObj ? enabledObj.value !== "false" : true,
+        multiplier: multiplierObj ? Number(multiplierObj.value || 2) : 2
+    };
+}
+
+
+function formatDuration(seconds) {
+    const value = Number(seconds);
+
+    if (!Number.isFinite(value)) {
+        return "-";
+    }
+
+    if (value < 60) {
+        return `${value.toFixed(1)}s`;
+    }
+
+    return `${(value / 60).toFixed(1)}m`;
+}
+
+
+function getCollectionWarning(sensorId) {
+    return collectionWarnings[String(sensorId)] || null;
+}
+
+
+function collectionWarningText(sensorId) {
+    const item = getCollectionWarning(sensorId);
+
+    if (!item) {
+        return "수집 지연 상태: -";
+    }
+
+    if (!item.enabled) {
+        return "수집 지연 경고: OFF";
+    }
+
+    if (item.collection_status === "LATE") {
+        return `수집 지연 경고: 마지막 ${formatDuration(item.elapsed_since_last_seconds)} / 평균 ${formatDuration(item.avg_collection_interval_seconds)}`;
+    }
+
+    if (item.collection_status === "INSUFFICIENT_SAMPLES") {
+        return `수집 지연 상태: 샘플 부족 (${item.collection_sample_count || 0})`;
+    }
+
+    return `수집 정상: 마지막 ${formatDuration(item.elapsed_since_last_seconds)} / 평균 ${formatDuration(item.avg_collection_interval_seconds)}`;
+}
+
+
+function collectionWarningClass(sensorId) {
+    const item = getCollectionWarning(sensorId);
+
+    if (!item || !item.enabled) {
+        return "collection-ok";
+    }
+
+    return item.collection_warning ? "collection-late" : "collection-ok";
+}
+
+
+function setShutdownMessage(message, isError = false) {
+    const messageObj = document.getElementById("systemShutdownMessage");
+
+    if (!messageObj) {
+        return;
+    }
+
+    messageObj.innerText = message || "";
+    messageObj.className = isError
+        ? "shutdown-message shutdown-error"
+        : "shutdown-message";
+}
+
+
+async function shutdownSystem() {
+    const button = document.getElementById("systemShutdownBtn");
+    const statusObj = document.getElementById("dashboardRunStatus");
+
+    if (systemShuttingDown) {
+        return;
+    }
+
+    const ok = window.confirm(
+        "시스템을 종료할까요?\nMQTT 수신과 DB 저장을 안전하게 중지합니다."
+    );
+
+    if (!ok) {
+        return;
+    }
+
+    systemShuttingDown = true;
+
+    if (button) {
+        button.disabled = true;
+        button.innerText = "Shutting down...";
+    }
+
+    if (statusObj) {
+        statusObj.innerText = "STOPPING";
+        statusObj.className = "status-warning";
+    }
+
+    setShutdownMessage("DB writer 정리 후 시스템을 종료합니다.");
+
+    if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+    }
+
+    try {
+        const res = await fetch("/api/system/shutdown", {
+            method: "POST"
+        });
+
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+
+        setShutdownMessage("종료 요청이 전달되었습니다. 잠시 후 연결이 끊어집니다.");
+    } catch (err) {
+        systemShuttingDown = false;
+
+        if (button) {
+            button.disabled = false;
+            button.innerText = "System Shutdown";
+        }
+
+        if (statusObj) {
+            statusObj.innerText = "RUNNING";
+            statusObj.className = "status-ok";
+        }
+
+        setShutdownMessage(`종료 요청 실패: ${err.message}`, true);
+    }
+}
+
+
+async function loadCollectionWarnings() {
+    const options = getCollectionWarningOptions();
+
+    try {
+        const res = await fetch(
+            `/api/collection-warnings?enabled=${options.enabled}&late_multiplier=${options.multiplier}&_=${Date.now()}`
+        );
+        const rows = await res.json();
+
+        collectionWarnings = {};
+
+        rows.forEach(row => {
+            if (row.sensor_id) {
+                collectionWarnings[String(row.sensor_id)] = row;
+            }
+        });
+    } catch (err) {
+        console.error("loadCollectionWarnings error:", err);
+        collectionWarnings = {};
+    }
 }
 
 
@@ -290,6 +457,10 @@ async function loadConfigInfo() {
                         <span class="info-label">
                             ${ruleText}
                         </span>
+                        <br>
+                        <span class="${collectionWarningClass(sensor.id)}">
+                            ${collectionWarningText(sensor.id)}
+                        </span>
                     </div>
                 `;
             });
@@ -370,6 +541,16 @@ async function loadSingleDashboard() {
         );
 
     const data = await res.json();
+
+    const singleWarning =
+        document.getElementById("singleCollectionWarning");
+
+    if (singleWarning) {
+        singleWarning.innerText =
+            collectionWarningText(sensorId);
+        singleWarning.className =
+            `collection-warning-box ${collectionWarningClass(sensorId)}`;
+    }
 
     updateSingleChart(
         sensor,
@@ -579,6 +760,9 @@ async function loadMultiDashboard() {
         const statusId =
             `status_${safeId(sensor.id)}`;
 
+        const collectStatusId =
+            `collect_status_${safeId(sensor.id)}`;
+
         if (!document.getElementById(panelId)) {
             container.innerHTML += `
                 <div class="chart-panel" id="${panelId}">
@@ -594,6 +778,10 @@ async function loadMultiDashboard() {
                         STATUS :
                         <span id="${statusId}">
                             NORMAL
+                        </span>
+                        <br>
+                        <span id="${collectStatusId}" class="collection-ok">
+                            수집 지연 상태: -
                         </span>
                     </div>
                 </div>
@@ -660,6 +848,18 @@ function updateMultiChart(sensor, labels, values, tickInterval) {
 
             statusObj.className =
                 latestStatus.className;
+        }
+
+        const collectStatusObj =
+            document.getElementById(
+                `collect_status_${safeId(sensorId)}`
+            );
+
+        if (collectStatusObj) {
+            collectStatusObj.innerText =
+                collectionWarningText(sensorId);
+            collectStatusObj.className =
+                collectionWarningClass(sensorId);
         }
     }
 
@@ -998,6 +1198,7 @@ async function loadPayloadStatistics() {
    Refresh
 -------------------------------- */
 async function refreshDashboard() {
+    await loadCollectionWarnings();
     await loadConfigInfo();
 
     if (pageMode === "single") {
@@ -1055,6 +1256,15 @@ async function initializeDashboard() {
     const refreshInterval =
         document.getElementById("refreshInterval");
 
+    const collectionWarningEnabled =
+        document.getElementById("collectionWarningEnabled");
+
+    const collectionWarningMultiplier =
+        document.getElementById("collectionWarningMultiplier");
+
+    const systemShutdownBtn =
+        document.getElementById("systemShutdownBtn");
+
     if (sensorSelect) {
         sensorSelect.addEventListener(
             "change",
@@ -1082,6 +1292,27 @@ async function initializeDashboard() {
         refreshInterval.addEventListener(
             "change",
             startRefreshTimer
+        );
+    }
+
+    if (collectionWarningEnabled) {
+        collectionWarningEnabled.addEventListener(
+            "change",
+            refreshDashboard
+        );
+    }
+
+    if (collectionWarningMultiplier) {
+        collectionWarningMultiplier.addEventListener(
+            "change",
+            refreshDashboard
+        );
+    }
+
+    if (systemShutdownBtn) {
+        systemShutdownBtn.addEventListener(
+            "click",
+            shutdownSystem
         );
     }
 }
