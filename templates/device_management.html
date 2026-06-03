@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Device and Fleet Management</title>
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+    <script src="/static/js/device_management.js" defer></script>
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+
+        <div class="info-box">
+            <h3>Device Scope</h3>
+            <div class="info-item">
+                <span class="info-label">USER</span><br>
+                Own fleets and devices only
+            </div>
+            <div class="info-item">
+                <span class="info-label">ADMIN</span><br>
+                All users, fleets and devices
+            </div>
+            <div class="info-item">
+                <span class="info-label">APR Topic</span><br>
+                Telemetry and policy topics are stored per device.
+            </div>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div class="main-header">
+            <h2>Device and Fleet Management</h2>
+            <div>Register edge devices per user and manage them as fleets.</div>
+        </div>
+
+        <div class="summary-cards">
+            <div class="summary-card">
+                <span>Fleets</span>
+                <strong id="fleetCount">0</strong>
+            </div>
+            <div class="summary-card">
+                <span>Devices</span>
+                <strong id="deviceCount">0</strong>
+            </div>
+            <div class="summary-card">
+                <span>Active Devices</span>
+                <strong id="activeDeviceCount">0</strong>
+            </div>
+        </div>
+
+        <div class="config-panel">
+            <h3>Fleet</h3>
+            <div class="form-row admin-only" style="display:none;">
+                <select id="fleetOwnerUser"></select>
+            </div>
+            <div class="form-row">
+                <input id="fleetId" type="hidden">
+                <input id="fleetName" placeholder="fleet name">
+                <input id="fleetDescription" placeholder="description">
+            </div>
+            <div class="button-row">
+                <button type="button" onclick="saveFleet()">Save Fleet</button>
+                <button type="button" onclick="clearFleetForm()">Clear</button>
+                <button type="button" class="danger-button" onclick="deleteFleet()">Delete Fleet</button>
+            </div>
+        </div>
+
+        <div class="table-panel compact-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fleet</th>
+                        <th>Owner</th>
+                        <th>Description</th>
+                        <th>Created</th>
+                    </tr>
+                </thead>
+                <tbody id="fleetTable"></tbody>
+            </table>
+        </div>
+
+        <div class="config-panel">
+            <h3>Device</h3>
+            <div class="form-row admin-only" style="display:none;">
+                <select id="deviceOwnerUser"></select>
+            </div>
+            <div class="form-row">
+                <input id="deviceRowId" type="hidden">
+                <input id="deviceId" placeholder="device id">
+                <input id="deviceName" placeholder="device name">
+                <input id="deviceType" placeholder="device type" value="raspberry_pi">
+                <select id="deviceStatus">
+                    <option value="ACTIVE">ACTIVE</option>
+                    <option value="INACTIVE">INACTIVE</option>
+                    <option value="MAINTENANCE">MAINTENANCE</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <select id="deviceFleet"></select>
+                <input id="topicPrefix" placeholder="topic prefix" value="iot/sensor">
+                <input id="telemetryTopic" placeholder="telemetry topic">
+                <input id="policyTopic" placeholder="policy topic">
+            </div>
+            <div class="form-row">
+                <input id="deviceDescription" placeholder="description">
+            </div>
+            <div class="button-row">
+                <button type="button" onclick="saveDevice()">Save Device</button>
+                <button type="button" onclick="clearDeviceForm()">Clear</button>
+                <button type="button" class="danger-button" onclick="deleteDevice()">Delete Device</button>
+            </div>
+        </div>
+
+        <div class="table-panel compact-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Device ID</th>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Fleet</th>
+                        <th>Owner</th>
+                        <th>Status</th>
+                        <th>Telemetry Topic</th>
+                        <th>Policy Topic</th>
+                    </tr>
+                </thead>
+                <tbody id="deviceTable"></tbody>
+            </table>
+        </div>
+    </main>
+</div>
+</body>
+</html>

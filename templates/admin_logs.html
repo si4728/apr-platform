@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Admin Logs</title>
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+    </aside>
+    <main class="main">
+        <div class="main-header">
+            <h2>{{ "Access Logs" if log_type == "access" else "Audit Logs" }}</h2>
+            <div>최근 300건을 표시합니다.</div>
+        </div>
+
+        <section class="dashboard-section">
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    {% if log_type == "access" %}
+                    <tr>
+                        <th>ID</th>
+                        <th>User</th>
+                        <th>Email</th>
+                        <th>Event</th>
+                        <th>Failure</th>
+                        <th>IP</th>
+                        <th>User Agent</th>
+                        <th>Time</th>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <th>ID</th>
+                        <th>Actor</th>
+                        <th>Action</th>
+                        <th>Target</th>
+                        <th>Target ID</th>
+                        <th>Detail</th>
+                        <th>IP</th>
+                        <th>Time</th>
+                    </tr>
+                    {% endif %}
+                    </thead>
+                    <tbody>
+                    {% for r in rows %}
+                    <tr>
+                        {% if log_type == "access" %}
+                        <td>{{ r[0] }}</td>
+                        <td>{{ r[1] or "-" }}</td>
+                        <td>{{ r[2] or "-" }}</td>
+                        <td>{{ r[3] }}</td>
+                        <td>{{ r[4] or "-" }}</td>
+                        <td>{{ r[5] or "-" }}</td>
+                        <td class="truncate-cell">{{ r[6] or "-" }}</td>
+                        <td>{{ r[7] }}</td>
+                        {% else %}
+                        <td>{{ r[0] }}</td>
+                        <td>{{ r[1] or "-" }}</td>
+                        <td>{{ r[2] }}</td>
+                        <td>{{ r[3] or "-" }}</td>
+                        <td>{{ r[4] or "-" }}</td>
+                        <td class="truncate-cell">{{ r[5] or "-" }}</td>
+                        <td>{{ r[6] or "-" }}</td>
+                        <td>{{ r[7] }}</td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+</div>
+</body>
+</html>

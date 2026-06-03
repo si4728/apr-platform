@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, g
 import sqlite3
 import json
 import hashlib
@@ -10,7 +10,9 @@ import atexit
 import socket
 import uuid
 from datetime import datetime, timezone, timedelta
+from functools import wraps
 import paho.mqtt.client as mqtt
+from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
     from policy.apr_policy import apr_engine
@@ -58,6 +60,7 @@ apr_auto_last_evaluation_at = {}
 apr_auto_evaluation_inflight = set()
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-before-production")
 
 DB_NAME = os.environ.get("DB_NAME", "iot_data.db")
 DB_JOURNAL_MODE = os.environ.get("DB_JOURNAL_MODE", "WAL").upper()
@@ -74,6 +77,28 @@ system_lock_stop_event = threading.Event()
 system_lock_thread = None
 mqtt_client = None
 
+ADMIN_PATH_PREFIXES = (
+    "/admin",
+    "/sensor_config",
+    "/queue_dashboard",
+    "/experiment_dashboard",
+    "/schema_dashboard",
+    "/apr_dashboard",
+    "/voice_dashboard",
+    "/server_operation_manual",
+)
+ADMIN_API_PREFIXES = (
+    "/api/admin",
+    "/api/system/shutdown",
+    "/api/sensors",
+    "/api/apr",
+    "/api/experiment/run",
+)
+PUBLIC_ENDPOINTS = {
+    "login",
+    "static",
+}
+
 # 사전에 정의된 센서 데이터로 인정할 최소 필드
 DEFINED_SENSOR_REQUIRED_FIELDS = {
     "sensor_id",
@@ -85,6 +110,258 @@ DEFINED_SENSOR_REQUIRED_FIELDS = {
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def is_api_request():
+    return request.path.startswith("/api/")
+
+
+def client_ip():
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.remote_addr or ""
+
+
+def fetch_user_by_id(user_id):
+    if not user_id:
+        return None
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, company, phone, role, status, created_at
+        FROM users
+        WHERE id = ?
+    """, (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "name": row[1],
+        "email": row[2],
+        "company": row[3],
+        "phone": row[4],
+        "role": row[5],
+        "status": row[6],
+        "created_at": row[7],
+    }
+
+
+def fetch_user_by_email(email):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, password_hash, company, phone, role, status, created_at
+        FROM users
+        WHERE lower(email) = lower(?)
+    """, (email,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "name": row[1],
+        "email": row[2],
+        "password_hash": row[3],
+        "company": row[4],
+        "phone": row[5],
+        "role": row[6],
+        "status": row[7],
+        "created_at": row[8],
+    }
+
+
+def current_user_is_admin():
+    user = getattr(g, "current_user", None)
+    return bool(user and user.get("role") == "ADMIN")
+
+
+def current_user_id():
+    user = getattr(g, "current_user", None)
+    return user.get("id") if user else None
+
+
+def can_manage_owner(owner_user_id):
+    if current_user_is_admin():
+        return True
+    return int(owner_user_id) == int(current_user_id())
+
+
+def resolve_owner_user_id(data):
+    if current_user_is_admin() and data.get("owner_user_id"):
+        return int(data.get("owner_user_id"))
+    return int(current_user_id())
+
+
+def fetch_user_exists(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def fetch_fleet_row(fleet_id):
+    if not fleet_id:
+        return None
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT f.id, f.name, f.description, f.owner_user_id, u.name, u.email, f.created_at, f.updated_at
+        FROM fleets f
+        LEFT JOIN users u ON u.id = f.owner_user_id
+        WHERE f.id = ?
+    """, (fleet_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def serialize_fleet(row):
+    return {
+        "id": row[0],
+        "name": row[1],
+        "description": row[2],
+        "owner_user_id": row[3],
+        "owner_name": row[4],
+        "owner_email": row[5],
+        "created_at": row[6],
+        "updated_at": row[7],
+    }
+
+
+def serialize_device(row):
+    return {
+        "id": row[0],
+        "device_id": row[1],
+        "device_name": row[2],
+        "device_type": row[3],
+        "fleet_id": row[4],
+        "fleet_name": row[5],
+        "owner_user_id": row[6],
+        "owner_name": row[7],
+        "owner_email": row[8],
+        "status": row[9],
+        "topic_prefix": row[10],
+        "telemetry_topic": row[11],
+        "policy_topic": row[12],
+        "description": row[13],
+        "created_at": row[14],
+        "updated_at": row[15],
+    }
+
+
+def log_access_event(event_type, email=None, user_id=None, failure_reason=None):
+    try:
+        conn = get_db_connection()
+        conn.execute("""
+            INSERT INTO access_logs
+            (user_id, email, event_type, failure_reason, ip_address, user_agent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            email,
+            event_type,
+            failure_reason,
+            client_ip(),
+            request.headers.get("User-Agent", ""),
+            now_iso(),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        print(f"[auth] access log failed: {exc}")
+
+
+def log_audit_event(action, target_type=None, target_id=None, detail=None, actor_user_id=None):
+    try:
+        actor_id = actor_user_id
+        if actor_id is None and getattr(g, "current_user", None):
+            actor_id = g.current_user.get("id")
+        conn = get_db_connection()
+        conn.execute("""
+            INSERT INTO audit_logs
+            (actor_user_id, action, target_type, target_id, detail_json, ip_address, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            actor_id,
+            action,
+            target_type,
+            str(target_id) if target_id is not None else None,
+            json.dumps(detail or {}, ensure_ascii=False),
+            client_ip(),
+            now_iso(),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        print(f"[auth] audit log failed: {exc}")
+
+
+def wants_admin(path):
+    if any(path.startswith(prefix) for prefix in ADMIN_PATH_PREFIXES):
+        return True
+    if any(path.startswith(prefix) for prefix in ADMIN_API_PREFIXES):
+        if path == "/api/sensors" and request.method == "GET":
+            return False
+        return True
+    return False
+
+
+def unauthorized_response():
+    if is_api_request():
+        return jsonify({"error": "authentication_required"}), 401
+    return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
+
+
+def forbidden_response():
+    if is_api_request():
+        return jsonify({"error": "admin_required"}), 403
+    return render_template("permission_denied.html", user=getattr(g, "current_user", None)), 403
+
+
+def login_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not getattr(g, "current_user", None):
+            return unauthorized_response()
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = getattr(g, "current_user", None)
+        if not user:
+            return unauthorized_response()
+        if user.get("role") != "ADMIN":
+            return forbidden_response()
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@app.before_request
+def load_current_user():
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    if request.path.startswith("/static/"):
+        return None
+
+    g.current_user = fetch_user_by_id(session.get("user_id"))
+    if not g.current_user:
+        return unauthorized_response()
+    if g.current_user.get("status") != "ACTIVE":
+        session.clear()
+        log_access_event("LOGIN_FAIL", email=g.current_user.get("email"), user_id=g.current_user.get("id"), failure_reason="SUSPENDED")
+        return unauthorized_response()
+    if wants_admin(request.path) and g.current_user.get("role") != "ADMIN":
+        return forbidden_response()
+    return None
 
 
 def get_system_identity():
@@ -624,6 +901,131 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_apr_policy_log_decided ON apr_policy_log(decided_at)")
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schema_profile_last_seen ON unknown_schema_profile(last_seen)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            company TEXT,
+            phone TEXT,
+            role TEXT NOT NULL DEFAULT 'USER',
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS access_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            email TEXT,
+            event_type TEXT NOT NULL,
+            failure_reason TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_access_logs_user ON access_logs(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_access_logs_created ON access_logs(created_at)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_user_id INTEGER,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            detail_json TEXT,
+            ip_address TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fleets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            owner_user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            FOREIGN KEY(owner_user_id) REFERENCES users(id)
+        )
+    """)
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fleets_owner_name ON fleets(owner_user_id, name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fleets_owner ON fleets(owner_user_id)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL UNIQUE,
+            device_name TEXT NOT NULL,
+            device_type TEXT,
+            fleet_id INTEGER,
+            owner_user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            topic_prefix TEXT,
+            telemetry_topic TEXT,
+            policy_topic TEXT,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            FOREIGN KEY(fleet_id) REFERENCES fleets(id),
+            FOREIGN KEY(owner_user_id) REFERENCES users(id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_owner ON devices(owner_user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_fleet ON devices(fleet_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_device_id ON devices(device_id)")
+
+    cur.execute("SELECT COUNT(*) FROM users")
+    if cur.fetchone()[0] == 0:
+        admin_email = os.environ.get("IOT_ADMIN_EMAIL", "admin@example.com")
+        admin_password = os.environ.get("IOT_ADMIN_PASSWORD", "admin1234")
+        user_email = os.environ.get("IOT_USER_EMAIL", "user@example.com")
+        user_password = os.environ.get("IOT_USER_PASSWORD", "user1234")
+        created_at = now_iso()
+        cur.execute("""
+            INSERT INTO users (name, email, password_hash, company, phone, role, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "Administrator",
+            admin_email,
+            generate_password_hash(admin_password),
+            "APR Platform",
+            "",
+            "ADMIN",
+            "ACTIVE",
+            created_at,
+        ))
+        cur.execute("""
+            INSERT INTO users (name, email, password_hash, company, phone, role, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "General User",
+            user_email,
+            generate_password_hash(user_password),
+            "APR Platform",
+            "",
+            "USER",
+            "ACTIVE",
+            created_at,
+        ))
+
+    cur.execute("""
+        INSERT OR IGNORE INTO fleets (name, description, owner_user_id, created_at, updated_at)
+        SELECT 'Default Fleet', 'Default fleet for registered devices', id, ?, ?
+        FROM users
+    """, (now_iso(), now_iso()))
 
     conn.commit()
     conn.close()
@@ -1305,6 +1707,523 @@ def start_mqtt():
     client.loop_start()
     apr_mqtt_client = client  # C2 push용으로 참조 보관
     return client
+
+
+@app.context_processor
+def inject_auth_context():
+    return {"current_user": getattr(g, "current_user", None)}
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        if session.get("user_id"):
+            return redirect(request.args.get("next") or url_for("dashboard"))
+        return render_template("login.html", error=None, next_url=request.args.get("next", ""))
+
+    email = (request.form.get("email") or "").strip()
+    password = request.form.get("password") or ""
+    next_url = request.form.get("next") or url_for("dashboard")
+    user = fetch_user_by_email(email)
+    if not user or not check_password_hash(user["password_hash"], password):
+        log_access_event("LOGIN_FAIL", email=email, failure_reason="INVALID_CREDENTIALS")
+        return render_template("login.html", error="Email or password is incorrect.", next_url=next_url), 401
+    if user.get("status") != "ACTIVE":
+        log_access_event("LOGIN_FAIL", email=email, user_id=user["id"], failure_reason="SUSPENDED")
+        return render_template("login.html", error="This account is suspended.", next_url=next_url), 403
+
+    session.clear()
+    session["user_id"] = user["id"]
+    session["role"] = user["role"]
+    log_access_event("LOGIN_SUCCESS", email=email, user_id=user["id"])
+    return redirect(next_url)
+
+
+@app.route("/logout")
+def logout():
+    user = fetch_user_by_id(session.get("user_id"))
+    if user:
+        log_access_event("LOGOUT", email=user.get("email"), user_id=user.get("id"))
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/api/auth/me")
+def api_auth_me():
+    return jsonify({
+        "authenticated": True,
+        "user": getattr(g, "current_user", None),
+    })
+
+
+@app.route("/admin/users")
+def admin_users():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, company, phone, role, status, created_at
+        FROM users
+        ORDER BY id
+    """)
+    users = [
+        {
+            "id": r[0],
+            "name": r[1],
+            "email": r[2],
+            "company": r[3],
+            "phone": r[4],
+            "role": r[5],
+            "status": r[6],
+            "created_at": r[7],
+        }
+        for r in cur.fetchall()
+    ]
+    conn.close()
+    return render_template("admin_users.html", users=users)
+
+
+@app.route("/admin/access-logs")
+def admin_access_logs():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, user_id, email, event_type, failure_reason, ip_address, user_agent, created_at
+        FROM access_logs
+        ORDER BY id DESC
+        LIMIT 300
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return render_template("admin_logs.html", log_type="access", rows=rows)
+
+
+@app.route("/admin/audit-logs")
+def admin_audit_logs():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, actor_user_id, action, target_type, target_id, detail_json, ip_address, created_at
+        FROM audit_logs
+        ORDER BY id DESC
+        LIMIT 300
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return render_template("admin_logs.html", log_type="audit", rows=rows)
+
+
+@app.route("/api/admin/users/<int:user_id>/status", methods=["POST"])
+def api_admin_update_user_status(user_id):
+    current = getattr(g, "current_user", None)
+    if current and current.get("id") == user_id:
+        return jsonify({"error": "cannot_change_own_status"}), 400
+    data = request.get_json(silent=True) or {}
+    status = str(data.get("status", "")).upper()
+    if status not in ("ACTIVE", "SUSPENDED"):
+        return jsonify({"error": "invalid_status"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, email, status FROM users WHERE id=?", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "user_not_found"}), 404
+    old_status = row[2]
+    cur.execute("UPDATE users SET status=? WHERE id=?", (status, user_id))
+    conn.commit()
+    conn.close()
+
+    action = "USER_ACTIVATED" if status == "ACTIVE" else "USER_SUSPENDED"
+    log_audit_event(action, "users", user_id, {"email": row[1], "old_status": old_status, "new_status": status})
+    return jsonify({"status": "ok", "user_id": user_id, "new_status": status})
+
+
+@app.route("/api/admin/users", methods=["POST"])
+def api_admin_create_user():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    role = str(data.get("role", "USER")).upper()
+    status = str(data.get("status", "ACTIVE")).upper()
+    company = (data.get("company") or "").strip()
+    phone = (data.get("phone") or "").strip()
+
+    if not name or not email or not password:
+        return jsonify({"error": "name_email_password_required"}), 400
+    if role not in ("ADMIN", "USER"):
+        return jsonify({"error": "invalid_role"}), 400
+    if status not in ("ACTIVE", "SUSPENDED"):
+        return jsonify({"error": "invalid_status"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO users (name, email, password_hash, company, phone, role, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            name,
+            email,
+            generate_password_hash(password),
+            company,
+            phone,
+            role,
+            status,
+            now_iso(),
+        ))
+        user_id = cur.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "email_already_exists"}), 400
+    conn.close()
+
+    log_audit_event("USER_CREATED", "users", user_id, {"email": email, "role": role, "status": status})
+    return jsonify({"status": "ok", "user_id": user_id})
+
+
+@app.route("/device_management")
+def device_management():
+    return render_template("device_management.html")
+
+
+@app.route("/api/admin/users/options")
+def api_admin_user_options():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, role, status
+        FROM users
+        ORDER BY name, email
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([
+        {
+            "id": r[0],
+            "name": r[1],
+            "email": r[2],
+            "role": r[3],
+            "status": r[4],
+        }
+        for r in rows
+    ])
+
+
+@app.route("/api/fleets", methods=["GET"])
+def api_get_fleets():
+    owner_filter = request.args.get("owner_user_id", type=int)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    sql = """
+        SELECT f.id, f.name, f.description, f.owner_user_id, u.name, u.email, f.created_at, f.updated_at
+        FROM fleets f
+        LEFT JOIN users u ON u.id = f.owner_user_id
+    """
+    params = []
+    clauses = []
+    if current_user_is_admin():
+        if owner_filter:
+            clauses.append("f.owner_user_id = ?")
+            params.append(owner_filter)
+    else:
+        clauses.append("f.owner_user_id = ?")
+        params.append(current_user_id())
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY u.name, f.name"
+    cur.execute(sql, params)
+    fleets = [serialize_fleet(r) for r in cur.fetchall()]
+    conn.close()
+    return jsonify(fleets)
+
+
+@app.route("/api/fleets", methods=["POST"])
+def api_create_fleet():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    description = (data.get("description") or "").strip()
+    if not name:
+        return jsonify({"error": "fleet_name_required"}), 400
+    try:
+        owner_user_id = resolve_owner_user_id(data)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_owner_user_id"}), 400
+    if not fetch_user_exists(owner_user_id):
+        return jsonify({"error": "owner_user_not_found"}), 404
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO fleets (name, description, owner_user_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, description, owner_user_id, now_iso(), now_iso()))
+        fleet_id = cur.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "fleet_name_already_exists_for_user"}), 400
+    conn.close()
+
+    log_audit_event("FLEET_CREATED", "fleets", fleet_id, {"name": name, "owner_user_id": owner_user_id})
+    return jsonify({"status": "ok", "fleet_id": fleet_id})
+
+
+@app.route("/api/fleets/<int:fleet_id>", methods=["PUT"])
+def api_update_fleet(fleet_id):
+    row = fetch_fleet_row(fleet_id)
+    if not row:
+        return jsonify({"error": "fleet_not_found"}), 404
+    current_owner = row[3]
+    if not can_manage_owner(current_owner):
+        return jsonify({"error": "forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    description = (data.get("description") or "").strip()
+    if not name:
+        return jsonify({"error": "fleet_name_required"}), 400
+    owner_user_id = current_owner
+    if current_user_is_admin() and data.get("owner_user_id"):
+        try:
+            owner_user_id = int(data.get("owner_user_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_owner_user_id"}), 400
+        if not fetch_user_exists(owner_user_id):
+            return jsonify({"error": "owner_user_not_found"}), 404
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE fleets
+            SET name = ?, description = ?, owner_user_id = ?, updated_at = ?
+            WHERE id = ?
+        """, (name, description, owner_user_id, now_iso(), fleet_id))
+        if owner_user_id != current_owner:
+            cur.execute("UPDATE devices SET owner_user_id = ? WHERE fleet_id = ?", (owner_user_id, fleet_id))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "fleet_name_already_exists_for_user"}), 400
+    conn.close()
+
+    log_audit_event("FLEET_UPDATED", "fleets", fleet_id, {"name": name, "owner_user_id": owner_user_id})
+    return jsonify({"status": "ok", "fleet_id": fleet_id})
+
+
+@app.route("/api/fleets/<int:fleet_id>", methods=["DELETE"])
+def api_delete_fleet(fleet_id):
+    row = fetch_fleet_row(fleet_id)
+    if not row:
+        return jsonify({"error": "fleet_not_found"}), 404
+    if not can_manage_owner(row[3]):
+        return jsonify({"error": "forbidden"}), 403
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM devices WHERE fleet_id = ?", (fleet_id,))
+    device_count = cur.fetchone()[0]
+    if device_count:
+        conn.close()
+        return jsonify({"error": "fleet_has_devices", "device_count": device_count}), 400
+    cur.execute("DELETE FROM fleets WHERE id = ?", (fleet_id,))
+    conn.commit()
+    conn.close()
+
+    log_audit_event("FLEET_DELETED", "fleets", fleet_id, {"name": row[1]})
+    return jsonify({"status": "ok", "fleet_id": fleet_id})
+
+
+@app.route("/api/devices", methods=["GET"])
+def api_get_devices():
+    owner_filter = request.args.get("owner_user_id", type=int)
+    fleet_filter = request.args.get("fleet_id", type=int)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    sql = """
+        SELECT d.id, d.device_id, d.device_name, d.device_type, d.fleet_id, f.name,
+               d.owner_user_id, u.name, u.email, d.status, d.topic_prefix,
+               d.telemetry_topic, d.policy_topic, d.description, d.created_at, d.updated_at
+        FROM devices d
+        LEFT JOIN fleets f ON f.id = d.fleet_id
+        LEFT JOIN users u ON u.id = d.owner_user_id
+    """
+    clauses = []
+    params = []
+    if current_user_is_admin():
+        if owner_filter:
+            clauses.append("d.owner_user_id = ?")
+            params.append(owner_filter)
+    else:
+        clauses.append("d.owner_user_id = ?")
+        params.append(current_user_id())
+    if fleet_filter:
+        clauses.append("d.fleet_id = ?")
+        params.append(fleet_filter)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY u.name, f.name, d.device_name"
+    cur.execute(sql, params)
+    devices = [serialize_device(r) for r in cur.fetchall()]
+    conn.close()
+    return jsonify(devices)
+
+
+@app.route("/api/devices", methods=["POST"])
+def api_create_device():
+    data = request.get_json(silent=True) or {}
+    config = load_config()
+    device_id = (data.get("device_id") or "").strip()
+    device_name = (data.get("device_name") or "").strip()
+    device_type = (data.get("device_type") or "raspberry_pi").strip()
+    status = str(data.get("status") or "ACTIVE").upper()
+    topic_prefix = (data.get("topic_prefix") or config.get("mqtt", {}).get("topic_prefix") or "iot/sensor").strip()
+    telemetry_topic = (data.get("telemetry_topic") or "").strip()
+    policy_topic = (data.get("policy_topic") or "").strip()
+    description = (data.get("description") or "").strip()
+    fleet_id = data.get("fleet_id") or None
+    if not device_id or not device_name:
+        return jsonify({"error": "device_id_and_name_required"}), 400
+    if status not in ("ACTIVE", "INACTIVE", "MAINTENANCE"):
+        return jsonify({"error": "invalid_status"}), 400
+    try:
+        owner_user_id = resolve_owner_user_id(data)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_owner_user_id"}), 400
+    if not fetch_user_exists(owner_user_id):
+        return jsonify({"error": "owner_user_not_found"}), 404
+    if fleet_id:
+        try:
+            fleet_id = int(fleet_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_fleet_id"}), 400
+        fleet = fetch_fleet_row(fleet_id)
+        if not fleet:
+            return jsonify({"error": "fleet_not_found"}), 404
+        if int(fleet[3]) != int(owner_user_id):
+            return jsonify({"error": "fleet_owner_mismatch"}), 400
+    if not telemetry_topic:
+        telemetry_topic = f"{topic_prefix}/{device_type}/{device_id}"
+    if not policy_topic:
+        policy_topic = f"{POLICY_TOPIC_PREFIX}{device_id}"
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO devices
+            (device_id, device_name, device_type, fleet_id, owner_user_id, status,
+             topic_prefix, telemetry_topic, policy_topic, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            device_id, device_name, device_type, fleet_id, owner_user_id, status,
+            topic_prefix, telemetry_topic, policy_topic, description, now_iso(), now_iso()
+        ))
+        row_id = cur.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "device_id_already_exists"}), 400
+    conn.close()
+
+    log_audit_event("DEVICE_CREATED", "devices", row_id, {"device_id": device_id, "owner_user_id": owner_user_id, "fleet_id": fleet_id})
+    return jsonify({"status": "ok", "id": row_id})
+
+
+@app.route("/api/devices/<int:row_id>", methods=["PUT"])
+def api_update_device(row_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, owner_user_id FROM devices WHERE id = ?", (row_id,))
+    existing = cur.fetchone()
+    conn.close()
+    if not existing:
+        return jsonify({"error": "device_not_found"}), 404
+    if not can_manage_owner(existing[1]):
+        return jsonify({"error": "forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    device_id = (data.get("device_id") or "").strip()
+    device_name = (data.get("device_name") or "").strip()
+    device_type = (data.get("device_type") or "raspberry_pi").strip()
+    status = str(data.get("status") or "ACTIVE").upper()
+    topic_prefix = (data.get("topic_prefix") or "iot/sensor").strip()
+    telemetry_topic = (data.get("telemetry_topic") or "").strip()
+    policy_topic = (data.get("policy_topic") or "").strip()
+    description = (data.get("description") or "").strip()
+    fleet_id = data.get("fleet_id") or None
+    owner_user_id = existing[1]
+    if current_user_is_admin() and data.get("owner_user_id"):
+        try:
+            owner_user_id = int(data.get("owner_user_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_owner_user_id"}), 400
+    if not device_id or not device_name:
+        return jsonify({"error": "device_id_and_name_required"}), 400
+    if status not in ("ACTIVE", "INACTIVE", "MAINTENANCE"):
+        return jsonify({"error": "invalid_status"}), 400
+    if not fetch_user_exists(owner_user_id):
+        return jsonify({"error": "owner_user_not_found"}), 404
+    if fleet_id:
+        try:
+            fleet_id = int(fleet_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_fleet_id"}), 400
+        fleet = fetch_fleet_row(fleet_id)
+        if not fleet:
+            return jsonify({"error": "fleet_not_found"}), 404
+        if int(fleet[3]) != int(owner_user_id):
+            return jsonify({"error": "fleet_owner_mismatch"}), 400
+    if not telemetry_topic:
+        telemetry_topic = f"{topic_prefix}/{device_type}/{device_id}"
+    if not policy_topic:
+        policy_topic = f"{POLICY_TOPIC_PREFIX}{device_id}"
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE devices
+            SET device_id = ?, device_name = ?, device_type = ?, fleet_id = ?, owner_user_id = ?,
+                status = ?, topic_prefix = ?, telemetry_topic = ?, policy_topic = ?,
+                description = ?, updated_at = ?
+            WHERE id = ?
+        """, (
+            device_id, device_name, device_type, fleet_id, owner_user_id, status,
+            topic_prefix, telemetry_topic, policy_topic, description, now_iso(), row_id
+        ))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "device_id_already_exists"}), 400
+    conn.close()
+
+    log_audit_event("DEVICE_UPDATED", "devices", row_id, {"device_id": device_id, "owner_user_id": owner_user_id, "fleet_id": fleet_id})
+    return jsonify({"status": "ok", "id": row_id})
+
+
+@app.route("/api/devices/<int:row_id>", methods=["DELETE"])
+def api_delete_device(row_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, device_id, owner_user_id FROM devices WHERE id = ?", (row_id,))
+    existing = cur.fetchone()
+    if not existing:
+        conn.close()
+        return jsonify({"error": "device_not_found"}), 404
+    if not can_manage_owner(existing[2]):
+        conn.close()
+        return jsonify({"error": "forbidden"}), 403
+    cur.execute("DELETE FROM devices WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
+
+    log_audit_event("DEVICE_DELETED", "devices", row_id, {"device_id": existing[1]})
+    return jsonify({"status": "ok", "id": row_id})
 
 
 @app.route("/")

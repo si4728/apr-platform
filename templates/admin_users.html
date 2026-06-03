@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>User Management</title>
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <script src="/static/js/common_menu.js"></script>
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
+        <div id="commonMenu"></div>
+    </aside>
+    <main class="main">
+        <div class="main-header">
+            <h2>User Management</h2>
+            <div>관리자와 일반 사용자 계정 상태를 관리합니다.</div>
+        </div>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Create User</h3>
+                    <p>신규 관리자 또는 일반 사용자 계정을 생성합니다.</p>
+                </div>
+            </div>
+            <div class="admin-form-grid">
+                <input id="newName" placeholder="Name">
+                <input id="newEmail" placeholder="Email">
+                <input id="newPassword" type="password" placeholder="Password">
+                <input id="newCompany" placeholder="Company">
+                <select id="newRole">
+                    <option value="USER">USER</option>
+                    <option value="ADMIN">ADMIN</option>
+                </select>
+                <select id="newStatus">
+                    <option value="ACTIVE">ACTIVE</option>
+                    <option value="SUSPENDED">SUSPENDED</option>
+                </select>
+                <button type="button" onclick="createUser()">Create</button>
+            </div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Users</h3>
+                    <p>본인 계정은 비활성화할 수 없습니다.</p>
+                </div>
+            </div>
+            <div class="table-panel compact-table">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Company</th>
+                        <th>Role</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                        <th>Action</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td>{{ user.id }}</td>
+                        <td>{{ user.name }}</td>
+                        <td>{{ user.email }}</td>
+                        <td>{{ user.company or "-" }}</td>
+                        <td><span class="role-badge role-{{ user.role|lower }}">{{ user.role }}</span></td>
+                        <td><span class="status-pill status-{{ user.status|lower }}">{{ user.status }}</span></td>
+                        <td>{{ user.created_at }}</td>
+                        <td>
+                            {% if current_user and current_user.id != user.id %}
+                                {% if user.status == "ACTIVE" %}
+                                <button class="small-danger-button" onclick="updateUserStatus({{ user.id }}, 'SUSPENDED')">Suspend</button>
+                                {% else %}
+                                <button class="small-button" onclick="updateUserStatus({{ user.id }}, 'ACTIVE')">Activate</button>
+                                {% endif %}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+</div>
+<script>
+async function updateUserStatus(userId, status) {
+    if (!confirm(`Change user ${userId} status to ${status}?`)) {
+        return;
+    }
+    const res = await fetch(`/api/admin/users/${userId}/status`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({status})
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `Request failed: ${res.status}`);
+        return;
+    }
+    location.reload();
+}
+
+async function createUser() {
+    const payload = {
+        name: document.getElementById("newName").value,
+        email: document.getElementById("newEmail").value,
+        password: document.getElementById("newPassword").value,
+        company: document.getElementById("newCompany").value,
+        role: document.getElementById("newRole").value,
+        status: document.getElementById("newStatus").value
+    };
+    const res = await fetch("/api/admin/users", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `Request failed: ${res.status}`);
+        return;
+    }
+    location.reload();
+}
+</script>
+</body>
+</html>

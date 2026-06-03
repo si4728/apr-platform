@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>APR Platform Login</title>
+    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+</head>
+<body class="auth-page">
+    <main class="auth-card">
+        <h1>APR Platform</h1>
+        <p>Sign in to continue.</p>
+
+        {% if error %}
+        <div class="auth-error">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="/login" class="auth-form">
+            <input type="hidden" name="next" value="{{ next_url }}">
+            <label>
+                Email
+                <input type="email" name="email" autocomplete="username" required autofocus>
+            </label>
+            <label>
+                Password
+                <input type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <button type="submit">Login</button>
+        </form>
+
+        <div class="auth-hint">
+            Initial admin: <code>admin@example.com</code> / <code>admin1234</code>
+        </div>
+    </main>
+</body>
+</html>
