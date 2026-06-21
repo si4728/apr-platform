@@ -4,7 +4,7 @@ cd C:\access\iot
 docker compose up -d --build
 
 접속 주소:
-http://localhost:5000
+http://localhost:4728
 
 상태 확인:
 docker ps

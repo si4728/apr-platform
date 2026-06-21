@@ -30,13 +30,13 @@ python server.py
 Default dashboard URL:
 
 ```text
-http://localhost:5000
+http://localhost:4728
 ```
 
 For other machines on the same network:
 
 ```text
-http://<server-ip>:5000
+http://<server-ip>:4728
 ```
 
 ## Required Server Files and Folders
@@ -72,7 +72,7 @@ iot/sensor/#
 7. Start Flask server on:
 
 ```text
-0.0.0.0:5000
+0.0.0.0:4728
 ```
 
 8. Serve dashboards and REST APIs.
@@ -339,7 +339,7 @@ Important metrics:
 Check:
 
 ```text
-http://localhost:5000/api/db/status
+http://localhost:4728/api/db/status
 ```
 
 ## Dashboard URLs
@@ -407,7 +407,7 @@ Check:
 
 - Python environment,
 - missing packages,
-- port `5000` already in use,
+- port `4728` already in use,
 - malformed `config.json`.
 
 ### MQTT connection fails
@@ -522,5 +522,5 @@ python server.py
 Then open:
 
 ```text
-http://localhost:5000
+http://localhost:4728
 ```

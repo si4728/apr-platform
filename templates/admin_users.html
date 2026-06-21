@@ -15,14 +15,34 @@
     <main class="main">
         <div class="main-header">
             <h2>User Management</h2>
-            <div>관리자와 일반 사용자 계정 상태를 관리합니다.</div>
+            <div>Site, Group, User 트리 구조로 계정과 기본 Topic을 관리합니다.</div>
         </div>
 
         <section class="dashboard-section">
             <div class="section-title-row">
                 <div>
+                    <h3>Site / Group 생성</h3>
+                    <p>신규 Site를 만들면 해당 Site 아래에 Default Group이 자동 생성됩니다.</p>
+                </div>
+            </div>
+            <div class="admin-form-grid">
+                <input id="newSiteName" placeholder="Site name">
+                <input id="newSiteTopic" placeholder="Site topic default: site name">
+                <button type="button" onclick="createSite()">Create Site</button>
+            </div>
+            <div class="admin-form-grid form-block">
+                <select id="groupSite"></select>
+                <input id="newGroupName" placeholder="Group name">
+                <input id="newGroupTopic" placeholder="Group topic default: site/group">
+                <button type="button" onclick="createGroup()">Create Group</button>
+            </div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
                     <h3>Create User</h3>
-                    <p>신규 관리자 또는 일반 사용자 계정을 생성합니다.</p>
+                    <p>일반 사용자는 Site와 Group을 지정해야 하며, 임시 사용자는 Default Site / Default Group에 자동 소속됩니다.</p>
                 </div>
             </div>
             <div class="admin-form-grid">
@@ -35,20 +55,52 @@
                     <option value="ADMIN">ADMIN</option>
                 </select>
                 <select id="newStatus">
+                    <option value="PENDING">PENDING</option>
                     <option value="ACTIVE">ACTIVE</option>
                     <option value="SUSPENDED">SUSPENDED</option>
                 </select>
-                <button type="button" onclick="createUser()">Create</button>
+                <select id="newSite" onchange="refreshUserGroupOptions()"></select>
+                <select id="newGroup"></select>
+                <input id="newUserTopic" placeholder="User topic default: first word">
+                <label class="check-row">
+                    <input id="newTemporary" type="checkbox" onchange="toggleTemporaryUser()">
+                    Temporary user
+                </label>
+                <button type="button" onclick="createUser()">Create User</button>
             </div>
         </section>
 
         <section class="dashboard-section">
             <div class="section-title-row">
                 <div>
-                    <h3>Users</h3>
-                    <p>본인 계정은 비활성화할 수 없습니다.</p>
+                    <h3>Site Tree</h3>
+                    <p>Site → Group → User 구조와 기본 Topic 경로입니다.</p>
                 </div>
             </div>
+            <div id="siteTree" class="tree-panel"></div>
+        </section>
+
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Users</h3>
+                    <p>계정별 소속과 Topic 경로를 확인합니다.</p>
+                </div>
+            </div>
+            <div class="selected-user-panel">
+                <input id="selectedUserId" placeholder="selected user id" readonly>
+                <input id="selectedUserLabel" placeholder="select a user from the table" readonly>
+                <select id="selectedUserStatus">
+                    <option value="PENDING">PENDING</option>
+                    <option value="ACTIVE">ACTIVE</option>
+                    <option value="SUSPENDED">SUSPENDED</option>
+                </select>
+                <input id="selectedUserPassword" type="password" placeholder="new password">
+                <button type="button" onclick="updateSelectedUserStatus()">Update Status</button>
+                <button type="button" class="small-danger-button" onclick="suspendSelectedUser()">Suspend</button>
+                <button type="button" onclick="resetSelectedUserPassword()">Reset Password</button>
+            </div>
+            <div id="selectedUserMessage" class="policy-status-box">Select a user from the table.</div>
             <div class="table-panel compact-table">
                 <table>
                     <thead>
@@ -56,33 +108,49 @@
                         <th>ID</th>
                         <th>Name</th>
                         <th>Email</th>
+                        <th>Site</th>
+                        <th>Group</th>
+                        <th>User Topic</th>
                         <th>Company</th>
                         <th>Role</th>
                         <th>Status</th>
                         <th>Created</th>
                         <th>Action</th>
+                        <th>Password Reset</th>
                     </tr>
                     </thead>
                     <tbody>
                     {% for user in users %}
-                    <tr>
+                    <tr data-user-row="{{ user.id }}" onclick="selectUser({{ user.id }})">
                         <td>{{ user.id }}</td>
                         <td>{{ user.name }}</td>
                         <td>{{ user.email }}</td>
+                        <td>{{ user.site_name or "-" }}</td>
+                        <td>{{ user.group_name or "-" }}</td>
+                        <td><code>{{ user.user_topic_path or "-" }}</code></td>
                         <td>{{ user.company or "-" }}</td>
                         <td><span class="role-badge role-{{ user.role|lower }}">{{ user.role }}</span></td>
                         <td><span class="status-pill status-{{ user.status|lower }}">{{ user.status }}</span></td>
                         <td>{{ user.created_at }}</td>
                         <td>
                             {% if current_user and current_user.id != user.id %}
-                                {% if user.status == "ACTIVE" %}
-                                <button class="small-danger-button" onclick="updateUserStatus({{ user.id }}, 'SUSPENDED')">Suspend</button>
+                                {% if user.status == "PENDING" %}
+                                <button class="small-button" onclick="event.stopPropagation(); updateUserStatus({{ user.id }}, 'ACTIVE')">Approve</button>
+                                <button class="small-danger-button" onclick="event.stopPropagation(); updateUserStatus({{ user.id }}, 'SUSPENDED')">Suspend</button>
+                                {% elif user.status == "ACTIVE" %}
+                                <button class="small-danger-button" onclick="event.stopPropagation(); updateUserStatus({{ user.id }}, 'SUSPENDED')">Suspend</button>
                                 {% else %}
-                                <button class="small-button" onclick="updateUserStatus({{ user.id }}, 'ACTIVE')">Activate</button>
+                                <button class="small-button" onclick="event.stopPropagation(); updateUserStatus({{ user.id }}, 'ACTIVE')">Activate</button>
                                 {% endif %}
                             {% else %}
                             -
                             {% endif %}
+                        </td>
+                        <td>
+                            <div class="inline-reset-form">
+                                <input id="resetPassword{{ user.id }}" type="password" placeholder="new password" onclick="event.stopPropagation()">
+                                <button class="small-button" type="button" onclick="event.stopPropagation(); resetUserPassword({{ user.id }}, '{{ user.email|e }}')">Reset</button>
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
@@ -93,6 +161,112 @@
     </main>
 </div>
 <script>
+let sites = {{ sites|tojson }};
+let groups = {{ groups|tojson }};
+let adminUsers = {{ users|tojson }};
+let currentAdminUserId = {{ (current_user.id if current_user else None)|tojson }};
+let selectedUserId = null;
+
+function option(label, value) {
+    const el = document.createElement("option");
+    el.textContent = label;
+    el.value = value;
+    return el;
+}
+
+function fillSelect(select, items, labelFn) {
+    select.innerHTML = "";
+    items.forEach(item => select.appendChild(option(labelFn(item), item.id)));
+}
+
+function setSelectedUserMessage(message, isError = false) {
+    const node = document.getElementById("selectedUserMessage");
+    node.textContent = message;
+    node.className = `policy-status-box ${isError ? "policy-error" : "policy-ok"}`;
+}
+
+function selectUser(userId) {
+    const user = adminUsers.find(item => Number(item.id) === Number(userId));
+    if (!user) {
+        setSelectedUserMessage("Selected user was not found.", true);
+        return;
+    }
+    selectedUserId = user.id;
+    document.querySelectorAll("[data-user-row]").forEach(row => {
+        row.classList.toggle("selected-table-row", Number(row.dataset.userRow) === Number(userId));
+    });
+    document.getElementById("selectedUserId").value = user.id;
+    document.getElementById("selectedUserLabel").value = `${user.name} / ${user.email}`;
+    document.getElementById("selectedUserStatus").value = user.status;
+    document.getElementById("selectedUserPassword").value = "";
+    setSelectedUserMessage(`Selected: ${user.name} (${user.email})`);
+}
+
+function selectedUser() {
+    if (!selectedUserId) {
+        setSelectedUserMessage("Select a user from the table first.", true);
+        return null;
+    }
+    return adminUsers.find(item => Number(item.id) === Number(selectedUserId));
+}
+
+function refreshSiteOptions() {
+    fillSelect(document.getElementById("groupSite"), sites, site => `${site.name} (${site.topic_name})`);
+    fillSelect(document.getElementById("newSite"), sites, site => `${site.name} (${site.topic_name})`);
+    refreshUserGroupOptions();
+}
+
+function refreshUserGroupOptions() {
+    const siteId = Number(document.getElementById("newSite").value || 0);
+    const filtered = groups.filter(group => Number(group.site_id) === siteId);
+    fillSelect(document.getElementById("newGroup"), filtered, group => {
+        const suffix = group.is_default ? " / default" : "";
+        return `${group.name} (${group.topic_path}${suffix})`;
+    });
+}
+
+function toggleTemporaryUser() {
+    const disabled = document.getElementById("newTemporary").checked;
+    document.getElementById("newSite").disabled = disabled;
+    document.getElementById("newGroup").disabled = disabled;
+}
+
+function renderSiteTree() {
+    const root = document.getElementById("siteTree");
+    if (!sites.length) {
+        root.textContent = "No sites";
+        return;
+    }
+    root.innerHTML = sites.map(site => {
+        const groupHtml = groups
+            .filter(group => Number(group.site_id) === Number(site.id))
+            .map(group => `
+                <li>
+                    <span class="tree-node">Group: ${group.name}</span>
+                    <code>${group.topic_path}</code>
+                    ${group.is_default ? '<span class="badge badge-active">Default</span>' : ''}
+                </li>
+            `).join("");
+        return `
+            <div class="tree-site">
+                <div><span class="tree-node">Site: ${site.name}</span> <code>${site.topic_name}</code></div>
+                <ul>${groupHtml}</ul>
+            </div>
+        `;
+    }).join("");
+}
+
+async function reloadOrgData() {
+    const [siteRes, groupRes] = await Promise.all([
+        fetch("/api/admin/sites"),
+        fetch("/api/admin/groups")
+    ]);
+    sites = await siteRes.json();
+    groups = await groupRes.json();
+    refreshSiteOptions();
+    renderSiteTree();
+}
+
 async function updateUserStatus(userId, status) {
     if (!confirm(`Change user ${userId} status to ${status}?`)) {
         return;
@@ -110,14 +284,124 @@ async function updateUserStatus(userId, status) {
     location.reload();
 }
 
+async function updateSelectedUserStatus() {
+    const user = selectedUser();
+    if (!user) {
+        return;
+    }
+    const status = document.getElementById("selectedUserStatus").value;
+    await updateUserStatus(user.id, status);
+}
+
+async function suspendSelectedUser() {
+    const user = selectedUser();
+    if (!user) {
+        return;
+    }
+    if (Number(user.id) === Number(currentAdminUserId)) {
+        setSelectedUserMessage("You cannot suspend your own account.", true);
+        return;
+    }
+    await updateUserStatus(user.id, "SUSPENDED");
+}
+
+async function resetPasswordForUser(userId, email, password, onSuccess) {
+    if (!password || password.length < 4) {
+        alert("Password must be at least 4 characters.");
+        return;
+    }
+    if (!confirm(`Reset password for ${email}?`)) {
+        return;
+    }
+    const res = await fetch(`/api/admin/users/${userId}/password-reset`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({password})
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `Request failed: ${res.status}`);
+        return;
+    }
+    if (onSuccess) {
+        onSuccess();
+    }
+    alert("Password reset completed.");
+}
+
+async function resetUserPassword(userId, email) {
+    const input = document.getElementById(`resetPassword${userId}`);
+    await resetPasswordForUser(userId, email, input.value, () => {
+        input.value = "";
+    });
+}
+
+async function resetSelectedUserPassword() {
+    const user = selectedUser();
+    if (!user) {
+        return;
+    }
+    const input = document.getElementById("selectedUserPassword");
+    await resetPasswordForUser(user.id, user.email, input.value, () => {
+        input.value = "";
+        setSelectedUserMessage(`Password reset completed for ${user.email}.`);
+    });
+}
+
+async function createSite() {
+    const payload = {
+        name: document.getElementById("newSiteName").value,
+        topic_name: document.getElementById("newSiteTopic").value
+    };
+    const res = await fetch("/api/admin/sites", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `Request failed: ${res.status}`);
+        return;
+    }
+    document.getElementById("newSiteName").value = "";
+    document.getElementById("newSiteTopic").value = "";
+    await reloadOrgData();
+}
+
+async function createGroup() {
+    const payload = {
+        site_id: document.getElementById("groupSite").value,
+        name: document.getElementById("newGroupName").value,
+        topic_name: document.getElementById("newGroupTopic").value
+    };
+    const res = await fetch("/api/admin/groups", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `Request failed: ${res.status}`);
+        return;
+    }
+    document.getElementById("newGroupName").value = "";
+    document.getElementById("newGroupTopic").value = "";
+    await reloadOrgData();
+}
+
 async function createUser() {
+    const temporary = document.getElementById("newTemporary").checked;
     const payload = {
         name: document.getElementById("newName").value,
         email: document.getElementById("newEmail").value,
         password: document.getElementById("newPassword").value,
         company: document.getElementById("newCompany").value,
         role: document.getElementById("newRole").value,
-        status: document.getElementById("newStatus").value
+        status: document.getElementById("newStatus").value,
+        site_id: temporary ? null : document.getElementById("newSite").value,
+        group_id: temporary ? null : document.getElementById("newGroup").value,
+        user_topic_name: document.getElementById("newUserTopic").value,
+        temporary
     };
     const res = await fetch("/api/admin/users", {
         method: "POST",
@@ -131,6 +415,10 @@ async function createUser() {
     }
     location.reload();
 }
+
+refreshSiteOptions();
+renderSiteTree();
+toggleTemporaryUser();
 </script>
 </body>
 </html>

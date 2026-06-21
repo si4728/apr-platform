@@ -1238,7 +1238,57 @@ function startRefreshTimer() {
 /* --------------------------------
    Init
 -------------------------------- */
+function moveDisplaySettingsToDashboard() {
+    const mount = document.getElementById("dashboardDisplaySettingsMount");
+    const sensorSelect = document.getElementById("sensorSelect");
+    const controlPanel = sensorSelect ? sensorSelect.closest(".control-panel") : null;
+    const sidebarBox = controlPanel ? controlPanel.closest(".info-box") : null;
+
+    if (!mount || !controlPanel) {
+        return;
+    }
+
+    const labels = {
+        sensorSelect: "센서 선택",
+        dataLimit: "최근 데이터",
+        tickInterval: "시간 표시 간격",
+        refreshInterval: "자동 갱신",
+        collectionWarningEnabled: "수집 지연 경고",
+        collectionWarningMultiplier: "지연 기준",
+    };
+
+    Object.entries(labels).forEach(([id, text]) => {
+        const select = document.getElementById(id);
+        const label = select ? select.closest("label") : null;
+        if (label && label.firstChild) {
+            label.firstChild.nodeValue = `${text}\n`;
+        }
+    });
+
+    mount.appendChild(controlPanel);
+    if (sidebarBox) {
+        sidebarBox.remove();
+    }
+}
+
+function moveSensorListToDashboard() {
+    const mount = document.getElementById("dashboardSensorListMount");
+    const sensorList = document.getElementById("sensorList");
+    const sidebarBox = sensorList ? sensorList.closest(".info-box") : null;
+
+    if (!mount || !sensorList) {
+        return;
+    }
+
+    mount.appendChild(sensorList);
+    if (sidebarBox) {
+        sidebarBox.remove();
+    }
+}
+
 async function initializeDashboard() {
+    moveDisplaySettingsToDashboard();
+    moveSensorListToDashboard();
     await loadSensorSelect();
     await refreshDashboard();
 

@@ -2,105 +2,474 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Schema Intelligence & Clustering</title>
-
+    <title>Unknown Schema Intelligence</title>
     <link rel="stylesheet" href="/static/css/dashboard_common.css">
     <script src="/static/js/common_menu.js"></script>
-    
     <style>
-        .cluster-card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-        .cluster-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #3b82f6; padding-bottom: 10px; margin-bottom: 15px; }
-        .cluster-title { font-size: 18px; font-weight: bold; color: #1e3a8a; }
-        .cluster-count { background: #dbeafe; color: #1e40af; padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
-        
-        .schema-badge { display: inline-block; background: #f3f4f6; color: #374151; font-family: monospace; font-size: 11px; padding: 2px 6px; border-radius: 4px; margin: 3px; border: 1px solid #e5e7eb; }
-        .schema-block { background: #f9fafb; padding: 15px; border-radius: 6px; border: 1px dashed #d1d5db; margin-top: 10px; }
+        .usi-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 420px;
+            gap: 16px;
+            align-items: start;
+        }
+        .usi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+        }
+        .usi-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 14px;
+            background: #fff;
+            cursor: pointer;
+        }
+        .usi-card.selected {
+            border-color: #2563eb;
+            box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+        }
+        .usi-card h4 {
+            margin: 0 0 8px 0;
+        }
+        .schema-badge {
+            display: inline-block;
+            background: #f3f4f6;
+            color: #374151;
+            font-family: Consolas, monospace;
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin: 3px;
+            border: 1px solid #e5e7eb;
+        }
+        .schema-block {
+            background: #f9fafb;
+            border: 1px dashed #d1d5db;
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 8px;
+        }
+        .confidence {
+            font-weight: 800;
+            color: #166534;
+        }
+        .mono-small {
+            font-family: Consolas, monospace;
+            font-size: 12px;
+            word-break: break-all;
+        }
+        .mapping-panel {
+            position: sticky;
+            top: 12px;
+        }
+        .mapping-panel label {
+            display: block;
+            font-size: 12px;
+            font-weight: 800;
+            color: #374151;
+            margin: 8px 0 4px;
+        }
+        .mapping-panel input,
+        .mapping-panel select,
+        .mapping-panel textarea {
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .mapping-row {
+            display: grid;
+            grid-template-columns: 120px minmax(0, 1fr);
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .sample-box {
+            max-height: 220px;
+            overflow: auto;
+            background: #111827;
+            color: #e5e7eb;
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 12px;
+        }
+        @media (max-width: 1100px) {
+            .usi-layout {
+                grid-template-columns: 1fr;
+            }
+            .mapping-panel {
+                position: static;
+            }
+        }
     </style>
 </head>
-
 <body>
 <div class="layout">
-
     <aside class="sidebar">
         <button id="sidebarToggle" class="sidebar-toggle" type="button">☰</button>
         <div id="commonMenu"></div>
-        
         <div class="info-box">
-            <h3>Schema Clustering</h3>
-            <p style="font-size: 13px; color: #4b5563;">Jaccard Similarity계수를 사용하여 실시간으로 비정형/미정의 수신 메시지의 스키마 구조적 거리값을 분석하여 유사 스키마 단위로 군집화합니다.</p>
+            <h3>USI</h3>
+            <div class="info-item">
+                미정의 MQTT Payload를 분석하고 사용자가 직접 운영 스키마로 정의합니다.
+            </div>
         </div>
     </aside>
 
     <main class="main">
         <div class="main-header">
-            <h2>Unknown Schema Clustering & Profiling</h2>
-            <div>미정의 실시간 유입 스키마 구조적 지능 분류 모니터</div>
+            <h2>Unknown Schema Intelligence</h2>
+            <div>미정의 MQTT Payload의 구조, 의미 후보, 저장 전략, 표준 스키마 승격 가능성을 분석하고 승인합니다.</div>
         </div>
 
         <section class="dashboard-section">
             <div class="section-title-row">
-                <h3>Jaccard Similarity Clustered Groups (유사도 분류군)</h3>
-                <button onclick="fetchClusters()" style="padding:6px 12px; background:#2563eb; color:white; border:none; border-radius:4px; cursor:pointer;">실시간 갱신</button>
+                <div>
+                    <h3>USI Profiles</h3>
+                    <p>Schema fingerprint별 추론 결과와 사용자 정의 상태입니다.</p>
+                </div>
+                <div class="button-row">
+                    <button type="button" onclick="loadProfiles()">Refresh</button>
+                    <button type="button" onclick="rebuildProfiles()">Rebuild From Unknown Payloads</button>
+                </div>
             </div>
-            
-            <div id="clustersContainer">
-                <p>스키마 군집 정보를 불러오고 있습니다...</p>
+            <div id="profileStatus" class="policy-status-box">Loading profiles...</div>
+            <div class="usi-layout">
+                <div id="profiles" class="usi-grid"></div>
+                <aside class="mapping-panel dashboard-section">
+                    <h3>Schema Definition</h3>
+                    <div id="definitionStatus" class="policy-status-box">Select a schema profile.</div>
+                    <input id="selectedSchemaHash" type="hidden">
+
+                    <label>Display Name</label>
+                    <input id="defDisplayName" placeholder="예: Raspberry System Metrics">
+
+                    <label>Target Type</label>
+                    <select id="defTargetType">
+                        <option value="sensor_data">sensor_data</option>
+                        <option value="device_metrics">device_metrics</option>
+                        <option value="adaptive_json">adaptive_json</option>
+                        <option value="raw_payload">raw_payload</option>
+                    </select>
+
+                    <label>Field Mapping</label>
+                    <div class="mapping-row"><span>sensor_id</span><select id="mapSensorId"></select></div>
+                    <div class="mapping-row"><span>sensor_type</span><select id="mapSensorType"></select></div>
+                    <div class="mapping-row"><span>value</span><select id="mapValue"></select></div>
+                    <div class="mapping-row"><span>unit</span><select id="mapUnit"></select></div>
+                    <div class="mapping-row"><span>timestamp</span><select id="mapTimestamp"></select></div>
+                    <div class="mapping-row"><span>cpu</span><select id="mapCpu"></select></div>
+                    <div class="mapping-row"><span>memory</span><select id="mapMemory"></select></div>
+                    <div class="mapping-row"><span>temperature</span><select id="mapTemperature"></select></div>
+
+                    <label>Scope</label>
+                    <div class="mapping-row">
+                        <select id="defScopeType">
+                            <option value="global">global</option>
+                            <option value="site">site</option>
+                            <option value="group">group</option>
+                            <option value="user">user</option>
+                            <option value="fleet">fleet</option>
+                            <option value="device">device</option>
+                        </select>
+                        <input id="defScopeId" placeholder="optional scope id">
+                    </div>
+
+                    <label>Notes</label>
+                    <textarea id="defNotes" rows="3" placeholder="검토 메모"></textarea>
+
+                    <div class="button-row">
+                        <button type="button" onclick="loadRecommendedMapping()">Use Recommendation</button>
+                        <button type="button" onclick="saveDefinition()">Save Draft</button>
+                        <button type="button" onclick="approveDefinition()">Approve</button>
+                        <button type="button" class="danger-button" onclick="rejectDefinition()">Reject</button>
+                    </div>
+
+                    <label>Sample Payload</label>
+                    <pre id="samplePayload" class="sample-box">No sample selected.</pre>
+                </aside>
             </div>
         </section>
 
+        <section class="dashboard-section">
+            <div class="section-title-row">
+                <div>
+                    <h3>Schema Clusters</h3>
+                    <p>유사한 key 구조를 가진 schema fingerprint 그룹입니다.</p>
+                </div>
+                <button type="button" onclick="loadClusters()">Refresh Clusters</button>
+            </div>
+            <div id="clusters"></div>
+        </section>
     </main>
 </div>
 
 <script>
-    async function fetchClusters() {
-        try {
-            const res = await fetch("/api/schema-clusters");
-            if (!res.ok) throw new Error("Failed to fetch clusters");
-            const data = await res.json();
-            
-            const container = document.getElementById("clustersContainer");
-            container.innerHTML = "";
-            
-            if (data.length === 0) {
-                container.innerHTML = "<p style='color:#6b7280;'>현재 생성된 미정의 스키마 분석 군집이 없습니다.</p>";
-                return;
-            }
-            
-            data.forEach(cluster => {
-                const card = document.createElement("div");
-                card.className = "cluster-card";
-                
-                let schemasHtml = "";
-                cluster.schemas.forEach(sc => {
-                    const keysBadges = sc.keys.map(k => `<span class="schema-badge">${k}</span>`).join(" ");
-                    schemasHtml += `
-                        <div class="schema-block">
-                            <div style="font-weight:bold; margin-bottom:5px; color:#4b5563;">
-                                Schema Fingerprint Hash: <span style="color:#2563eb; font-family:monospace;">${sc.schema_hash}</span> 
-                                <span style="font-size:12px; color:#6b7280; font-weight:normal; margin-left:10px;">수신 메시지 수: ${sc.message_count}건</span>
-                            </div>
-                            <div>${keysBadges}</div>
-                        </div>
-                    `;
-                });
-                
-                card.innerHTML = `
-                    <div class="cluster-header">
-                        <span class="cluster-title">Group: ${cluster.cluster_id}</span>
-                        <span class="cluster-count">포함 스키마 종류: ${cluster.schemas.length}종</span>
-                    </div>
-                    ${schemasHtml}
-                `;
-                container.appendChild(card);
-            });
-        } catch (err) {
-            console.error(err);
-        }
+let profiles = [];
+let selectedProfile = null;
+
+function escapeHtml(text) {
+    return String(text === undefined || text === null ? "" : text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+async function requestJson(url, options = {}) {
+    const res = await fetch(url, {
+        ...options,
+        headers: {"Content-Type": "application/json", ...(options.headers || {})},
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        throw new Error(data.error || `request failed: ${res.status}`);
     }
-    
-    window.onload = () => {
-        fetchClusters();
+    return data;
+}
+
+function mappingText(mapping) {
+    const fields = mapping?.field_mapping || {};
+    const entries = Object.entries(fields).filter(([key]) => key !== "profile");
+    if (!entries.length) return "-";
+    return entries.map(([key, value]) => `${key}: ${value}`).join(", ");
+}
+
+function definitionBadge(definition) {
+    if (!definition) return '<span class="badge badge-warning">DISCOVERED</span>';
+    const cls = definition.status === "APPROVED" ? "badge-active" : definition.status === "REJECTED" ? "badge-warning" : "badge-info";
+    return `<span class="badge ${cls}">${escapeHtml(definition.status)}</span>`;
+}
+
+function renderProfiles(rows) {
+    const root = document.getElementById("profiles");
+    if (!rows.length) {
+        root.innerHTML = "<div class='usi-card'>No USI profiles yet.</div>";
+        return;
+    }
+    root.innerHTML = rows.map(row => {
+        const roles = row.semantic_summary?.known_roles || [];
+        const mapping = row.recommended_mapping || {};
+        const selected = selectedProfile && selectedProfile.schema_hash === row.schema_hash ? "selected" : "";
+        return `
+            <article class="usi-card ${selected}" onclick="selectProfile('${escapeHtml(row.schema_hash)}')">
+                <h4>${escapeHtml(row.schema_hash)}</h4>
+                <div class="mono-small">${escapeHtml(row.last_topic || row.first_topic || "-")}</div>
+                <p>
+                    <span class="badge badge-info">${escapeHtml(row.payload_type || "unknown")}</span>
+                    <span class="badge badge-active">${escapeHtml(row.storage_strategy || "-")}</span>
+                    ${definitionBadge(row.definition)}
+                    <span class="confidence">${Math.round((row.confidence_score || 0) * 100)}%</span>
+                </p>
+                <p><strong>Promotion:</strong> ${escapeHtml(mapping.promotion || "none")}</p>
+                <p><strong>Mapping:</strong> <span class="mono-small">${escapeHtml(mappingText(mapping))}</span></p>
+                <p><strong>Roles:</strong> ${roles.map(role => `<span class="schema-badge">${escapeHtml(role)}</span>`).join("") || "-"}</p>
+            </article>
+        `;
+    }).join("");
+}
+
+function fieldOptionsHtml(fields, selectedValue) {
+    const empty = `<option value="">-</option>`;
+    return empty + fields.map(field => {
+        const selected = field.path === selectedValue ? "selected" : "";
+        return `<option value="${escapeHtml(field.path)}" ${selected}>${escapeHtml(field.path)} (${escapeHtml(field.semantic_role || "unknown")}/${escapeHtml(field.type || "-")})</option>`;
+    }).join("");
+}
+
+function setSelectOptions(id, selectedValue = "") {
+    const fields = selectedProfile?.inferred_fields || [];
+    document.getElementById(id).innerHTML = fieldOptionsHtml(fields, selectedValue);
+}
+
+function setDefinitionStatus(message, isError = false) {
+    const node = document.getElementById("definitionStatus");
+    node.textContent = message;
+    node.className = `policy-status-box ${isError ? "policy-error" : "policy-ok"}`;
+}
+
+function fillDefinitionForm(definition, useRecommended = false) {
+    if (!selectedProfile) return;
+    const recommended = selectedProfile.recommended_mapping || {};
+    const sourceMapping = useRecommended ? (recommended.field_mapping || {}) : (definition?.field_mapping || recommended.field_mapping || {});
+    document.getElementById("selectedSchemaHash").value = selectedProfile.schema_hash;
+    document.getElementById("defDisplayName").value = definition?.display_name || "";
+    document.getElementById("defTargetType").value = definition?.target_type || (recommended.promotion === "device_metrics_candidate" ? "device_metrics" : "sensor_data");
+    document.getElementById("defScopeType").value = definition?.scope_type || "global";
+    document.getElementById("defScopeId").value = definition?.scope_id || "";
+    document.getElementById("defNotes").value = definition?.notes || "";
+    setSelectOptions("mapSensorId", sourceMapping.sensor_id || "");
+    setSelectOptions("mapSensorType", sourceMapping.sensor_type || "");
+    setSelectOptions("mapValue", sourceMapping.value || "");
+    setSelectOptions("mapUnit", sourceMapping.unit || "");
+    setSelectOptions("mapTimestamp", sourceMapping.timestamp || "");
+    setSelectOptions("mapCpu", sourceMapping.cpu || "");
+    setSelectOptions("mapMemory", sourceMapping.memory || "");
+    setSelectOptions("mapTemperature", sourceMapping.temperature || "");
+    try {
+        document.getElementById("samplePayload").textContent = JSON.stringify(JSON.parse(selectedProfile.sample_payload_text || "{}"), null, 2);
+    } catch {
+        document.getElementById("samplePayload").textContent = selectedProfile.sample_payload_text || "No sample payload.";
+    }
+    const status = definition ? `Definition status: ${definition.status}` : "No user definition yet. Review and save a draft.";
+    setDefinitionStatus(status, false);
+}
+
+function buildDefinitionPayload() {
+    const mapping = {
+        sensor_id: document.getElementById("mapSensorId").value,
+        sensor_type: document.getElementById("mapSensorType").value,
+        value: document.getElementById("mapValue").value,
+        unit: document.getElementById("mapUnit").value,
+        timestamp: document.getElementById("mapTimestamp").value,
+        cpu: document.getElementById("mapCpu").value,
+        memory: document.getElementById("mapMemory").value,
+        temperature: document.getElementById("mapTemperature").value,
     };
+    Object.keys(mapping).forEach(key => {
+        if (!mapping[key]) delete mapping[key];
+    });
+    return {
+        display_name: document.getElementById("defDisplayName").value,
+        target_type: document.getElementById("defTargetType").value,
+        field_mapping: mapping,
+        scope_type: document.getElementById("defScopeType").value,
+        scope_id: document.getElementById("defScopeId").value,
+        notes: document.getElementById("defNotes").value,
+    };
+}
+
+async function selectProfile(schemaHash) {
+    selectedProfile = profiles.find(row => row.schema_hash === schemaHash);
+    renderProfiles(profiles);
+    try {
+        const detail = await requestJson(`/api/schema-inference/${schemaHash}`);
+        selectedProfile = {...selectedProfile, ...detail};
+        fillDefinitionForm(detail.definition);
+    } catch (err) {
+        setDefinitionStatus(`Load failed: ${err.message}`, true);
+    }
+}
+
+function loadRecommendedMapping() {
+    if (!selectedProfile) return;
+    fillDefinitionForm(selectedProfile.definition, true);
+}
+
+async function saveDefinition() {
+    const schemaHash = document.getElementById("selectedSchemaHash").value;
+    if (!schemaHash) {
+        setDefinitionStatus("Select a schema first.", true);
+        return;
+    }
+    try {
+        const data = await requestJson(`/api/usi/profiles/${schemaHash}/definition`, {
+            method: "POST",
+            body: JSON.stringify(buildDefinitionPayload()),
+        });
+        selectedProfile.definition = data.definition;
+        setDefinitionStatus(`Draft saved: ${data.definition.status}`);
+        await loadProfiles(false);
+    } catch (err) {
+        setDefinitionStatus(`Save failed: ${err.message}`, true);
+    }
+}
+
+async function approveDefinition() {
+    const schemaHash = document.getElementById("selectedSchemaHash").value;
+    if (!schemaHash) return;
+    try {
+        const data = await requestJson(`/api/usi/profiles/${schemaHash}/approve`, {
+            method: "POST",
+            body: JSON.stringify({notes: document.getElementById("defNotes").value}),
+        });
+        selectedProfile.definition = data.definition;
+        setDefinitionStatus(`Approved: ${data.definition.display_name || schemaHash}`);
+        await loadProfiles(false);
+    } catch (err) {
+        setDefinitionStatus(`Approve failed: ${err.message}`, true);
+    }
+}
+
+async function rejectDefinition() {
+    const schemaHash = document.getElementById("selectedSchemaHash").value;
+    if (!schemaHash) return;
+    try {
+        const data = await requestJson(`/api/usi/profiles/${schemaHash}/reject`, {
+            method: "POST",
+            body: JSON.stringify({notes: document.getElementById("defNotes").value}),
+        });
+        selectedProfile.definition = data.definition;
+        setDefinitionStatus(`Rejected: ${schemaHash}`);
+        await loadProfiles(false);
+    } catch (err) {
+        setDefinitionStatus(`Reject failed: ${err.message}`, true);
+    }
+}
+
+async function loadProfiles(clearSelection = true) {
+    const status = document.getElementById("profileStatus");
+    try {
+        profiles = await requestJson("/api/schema-stats?limit=100");
+        if (clearSelection) selectedProfile = null;
+        const candidates = profiles.filter(row => (row.recommended_mapping?.promotion || "none") !== "none").length;
+        const approved = profiles.filter(row => row.definition?.status === "APPROVED").length;
+        status.textContent = `Profiles=${profiles.length}, promotion candidates=${candidates}, approved=${approved}`;
+        status.className = "policy-status-box policy-ok";
+        renderProfiles(profiles);
+    } catch (err) {
+        status.textContent = `Profile load failed: ${err.message}`;
+        status.className = "policy-status-box policy-error";
+    }
+}
+
+async function rebuildProfiles() {
+    if (!confirm("Rebuild USI profiles from recent unknown payloads?")) return;
+    const status = document.getElementById("profileStatus");
+    try {
+        const result = await requestJson("/api/admin/usi/rebuild-profiles", {
+            method: "POST",
+            body: JSON.stringify({limit: 20000}),
+        });
+        status.textContent = `Rebuild completed: rebuilt=${result.rebuilt}, failed=${result.failed}`;
+        status.className = result.failed ? "policy-status-box policy-error" : "policy-status-box policy-ok";
+        await loadProfiles();
+        await loadClusters();
+    } catch (err) {
+        status.textContent = `Rebuild failed: ${err.message}`;
+        status.className = "policy-status-box policy-error";
+    }
+}
+
+async function loadClusters() {
+    const root = document.getElementById("clusters");
+    try {
+        const data = await requestJson("/api/schema-clusters");
+        if (!data.length) {
+            root.innerHTML = "<p>No schema clusters yet.</p>";
+            return;
+        }
+        root.innerHTML = data.map(cluster => `
+            <div class="usi-card">
+                <h4>${escapeHtml(cluster.cluster_id)} <span class="badge badge-info">${cluster.schemas.length} schemas</span></h4>
+                ${cluster.schemas.map(schema => `
+                    <div class="schema-block">
+                        <strong>${escapeHtml(schema.schema_hash)}</strong>
+                        <span class="badge badge-active">${escapeHtml(schema.payload_type || "unknown")}</span>
+                        <span>${schema.message_count || 0} messages</span>
+                        <div>${(schema.keys || []).slice(0, 20).map(key => `<span class="schema-badge">${escapeHtml(key)}</span>`).join("")}</div>
+                    </div>
+                `).join("")}
+            </div>
+        `).join("");
+    } catch (err) {
+        root.innerHTML = `<p>Cluster load failed: ${escapeHtml(err.message)}</p>`;
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    loadProfiles();
+    loadClusters();
+});
 </script>
 </body>
 </html>

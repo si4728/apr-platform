@@ -21,7 +21,7 @@ docker compose up -d --build
 ## 접속
 
 ```text
-http://localhost:5000
+http://localhost:4728
 ```
 
 ## 상태 확인
@@ -46,7 +46,7 @@ docker compose down
 
 ## 현재 설정
 
-- 대시보드 포트: `5000`
+- 대시보드 포트: `4728`
 - MQTT 서버: `config.json`의 `218.146.225.166:1883`
 - DB 파일: `C:\access\iot\iot_data.db`를 컨테이너 `/app/iot_data.db`로 연결
 - 설정 파일: `C:\access\iot\config.json`를 컨테이너 `/app/config.json`로 읽기 전용 연결

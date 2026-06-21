@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for, g
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, g, send_file
 import sqlite3
 import json
 import hashlib
@@ -6,9 +6,12 @@ import time
 import threading
 import html
 import os
+import io
+import zipfile
 import atexit
 import socket
 import uuid
+import re
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 import paho.mqtt.client as mqtt
@@ -68,6 +71,7 @@ DB_BUSY_TIMEOUT_MS = int(os.environ.get("DB_BUSY_TIMEOUT_MS", "30000"))
 SYSTEM_MODE = os.environ.get("SYSTEM_MODE", "windows")
 SYSTEM_LOCK_FILE = os.environ.get("SYSTEM_LOCK_FILE", os.path.join("runtime", "iot_dashboard.lock"))
 SYSTEM_LOCK_STALE_SECONDS = int(os.environ.get("SYSTEM_LOCK_STALE_SECONDS", "30"))
+DEFAULT_APP_PORT = int(os.environ.get("PORT", "4728"))
 CONFIG_FILE = "config.json"
 POLICY_TOPIC_PREFIX = "iot/sensor/policy/"
 KST = timezone(timedelta(hours=9))
@@ -76,6 +80,7 @@ system_lock_active = False
 system_lock_stop_event = threading.Event()
 system_lock_thread = None
 mqtt_client = None
+mqtt_startup_error = None
 
 ADMIN_PATH_PREFIXES = (
     "/admin",
@@ -96,6 +101,7 @@ ADMIN_API_PREFIXES = (
 )
 PUBLIC_ENDPOINTS = {
     "login",
+    "register",
     "static",
 }
 
@@ -129,9 +135,12 @@ def fetch_user_by_id(user_id):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, name, email, company, phone, role, status, created_at
-        FROM users
-        WHERE id = ?
+        SELECT u.id, u.name, u.email, u.company, u.phone, u.role, u.status, u.created_at,
+               u.site_id, s.name, u.group_id, g.name, u.user_topic_name, u.user_topic_path
+        FROM users u
+        LEFT JOIN sites s ON s.id = u.site_id
+        LEFT JOIN user_groups g ON g.id = u.group_id
+        WHERE u.id = ?
     """, (user_id,))
     row = cur.fetchone()
     conn.close()
@@ -146,6 +155,12 @@ def fetch_user_by_id(user_id):
         "role": row[5],
         "status": row[6],
         "created_at": row[7],
+        "site_id": row[8],
+        "site_name": row[9],
+        "group_id": row[10],
+        "group_name": row[11],
+        "user_topic_name": row[12],
+        "user_topic_path": row[13],
     }
 
 
@@ -153,9 +168,13 @@ def fetch_user_by_email(email):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, name, email, password_hash, company, phone, role, status, created_at
-        FROM users
-        WHERE lower(email) = lower(?)
+        SELECT u.id, u.name, u.email, u.password_hash, u.company, u.phone,
+               u.role, u.status, u.created_at,
+               u.site_id, s.name, u.group_id, g.name, u.user_topic_name, u.user_topic_path
+        FROM users u
+        LEFT JOIN sites s ON s.id = u.site_id
+        LEFT JOIN user_groups g ON g.id = u.group_id
+        WHERE lower(u.email) = lower(?)
     """, (email,))
     row = cur.fetchone()
     conn.close()
@@ -171,6 +190,12 @@ def fetch_user_by_email(email):
         "role": row[6],
         "status": row[7],
         "created_at": row[8],
+        "site_id": row[9],
+        "site_name": row[10],
+        "group_id": row[11],
+        "group_name": row[12],
+        "user_topic_name": row[13],
+        "user_topic_path": row[14],
     }
 
 
@@ -205,15 +230,396 @@ def fetch_user_exists(user_id):
     return bool(row)
 
 
+USER_STATUSES = ("PENDING", "ACTIVE", "SUSPENDED")
+
+
+def default_user_topic_name(name):
+    words = str(name or "").strip().split()
+    return normalize_topic_part(words[0] if words else "user", "user")
+
+
+def build_user_topic_path(group_topic_path, user_topic_name):
+    return f"{group_topic_path}/{normalize_topic_part(user_topic_name, 'user')}"
+
+
+def normalize_topic_part(value, fallback="default"):
+    text = str(value or "").strip()
+    if not text:
+        text = fallback
+    text = re.sub(r"\s+", "_", text)
+    text = text.replace("/", "_").replace("\\", "_")
+    text = re.sub(r"[^\w.-]", "_", text, flags=re.UNICODE)
+    text = re.sub(r"_+", "_", text).strip("._-")
+    return text or fallback
+
+
+def build_fleet_topic_path(user_topic_path, fleet_name):
+    return f"{user_topic_path}/{normalize_topic_part(fleet_name, 'fleet')}"
+
+
+def build_device_telemetry_topic(topic_prefix, device_type, device_id):
+    return f"{topic_prefix}/{normalize_topic_part(device_type, 'device')}/{normalize_topic_part(device_id, 'device')}"
+
+
+def build_device_policy_topic(topic_prefix, device_id):
+    return f"{topic_prefix}/policy/{normalize_topic_part(device_id, 'device')}"
+
+
+DEVICE_OS_VALUES = ("raspberry_pi", "ubuntu_linux", "windows_pc")
+
+
+def normalize_device_os(value):
+    text = str(value or "").strip().lower()
+    aliases = {
+        "raspberry": "raspberry_pi",
+        "raspi": "raspberry_pi",
+        "raspbian": "raspberry_pi",
+        "linux": "ubuntu_linux",
+        "ubuntu": "ubuntu_linux",
+        "windows": "windows_pc",
+        "pc": "windows_pc",
+    }
+    text = aliases.get(text, text)
+    return text if text in DEVICE_OS_VALUES else "raspberry_pi"
+
+
+def clean_mqtt_publish_topic(value):
+    topic = str(value or "").strip().strip("/")
+    if not topic:
+        return ""
+    if "#" in topic or "+" in topic:
+        raise ValueError("topic_wildcards_not_allowed")
+    return re.sub(r"/+", "/", topic)
+
+
+def fetch_user_topic_context(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT u.id, u.name, u.email, u.status, u.user_topic_name, u.user_topic_path,
+               g.topic_path
+        FROM users u
+        LEFT JOIN user_groups g ON g.id = u.group_id
+        WHERE u.id = ?
+    """, (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    topic_name = row[4] or default_user_topic_name(row[1])
+    topic_path = row[5] or build_user_topic_path(row[6] or "default_site/default_group", topic_name)
+    return {
+        "id": row[0],
+        "name": row[1],
+        "email": row[2],
+        "status": row[3],
+        "user_topic_name": topic_name,
+        "user_topic_path": topic_path,
+    }
+
+
+def fetch_fleet_topic_context(fleet_id):
+    if not fleet_id:
+        return None
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT f.id, f.name, f.owner_user_id, f.topic_name, f.topic_path,
+               u.user_topic_path
+        FROM fleets f
+        LEFT JOIN users u ON u.id = f.owner_user_id
+        WHERE f.id = ?
+    """, (fleet_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    topic_name = row[3] or normalize_topic_part(row[1], "fleet")
+    topic_path = row[4] or build_fleet_topic_path(row[5] or "default_site/default_group/user", row[1])
+    return {
+        "id": row[0],
+        "name": row[1],
+        "owner_user_id": row[2],
+        "topic_name": topic_name,
+        "topic_path": topic_path,
+    }
+
+
+def expected_device_topic_context(owner_user_id, fleet_id, device_type, device_id):
+    owner_context = fetch_user_topic_context(owner_user_id)
+    if not owner_context:
+        return None
+    fleet_context = fetch_fleet_topic_context(fleet_id) if fleet_id else None
+    topic_prefix = fleet_context["topic_path"] if fleet_context else owner_context["user_topic_path"]
+    return {
+        "topic_prefix": topic_prefix,
+        "telemetry_topic": build_device_telemetry_topic(topic_prefix, device_type, device_id),
+        "policy_topic": build_device_policy_topic(topic_prefix, device_id),
+        "source": "fleet" if fleet_context else "user",
+    }
+
+
+def fixed_device_topic_fields(owner_user_id, fleet_id, device_type, device_id):
+    topic_context = expected_device_topic_context(owner_user_id, fleet_id, device_type, device_id)
+    if not topic_context:
+        return None
+    return (
+        topic_context["topic_prefix"],
+        topic_context["telemetry_topic"],
+        topic_context["policy_topic"],
+    )
+
+
+def resolve_device_topics(owner_user_id, fleet_id, device_type, device_id, data):
+    fixed_topics = fixed_device_topic_fields(owner_user_id, fleet_id, device_type, device_id)
+    if not fixed_topics:
+        return None
+    default_prefix, default_telemetry, default_policy = fixed_topics
+    topic_prefix = clean_mqtt_publish_topic(data.get("topic_prefix") or default_prefix)
+    telemetry_topic = clean_mqtt_publish_topic(data.get("telemetry_topic") or "")
+    policy_topic = clean_mqtt_publish_topic(data.get("policy_topic") or "")
+    if not telemetry_topic:
+        telemetry_topic = build_device_telemetry_topic(topic_prefix, device_type, device_id)
+    if not policy_topic:
+        policy_topic = build_device_policy_topic(topic_prefix, device_id)
+    return topic_prefix, telemetry_topic, policy_topic
+
+
+def topic_consistency_report(repair_missing=False):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now = now_iso()
+    repaired = {"fleets": 0, "devices": 0}
+
+    cur.execute("""
+        SELECT f.id, f.name, f.owner_user_id, f.topic_name, f.topic_path, u.user_topic_path
+        FROM fleets f
+        LEFT JOIN users u ON u.id = f.owner_user_id
+        ORDER BY f.id
+    """)
+    fleet_issues = []
+    for fleet_id, name, owner_user_id, topic_name, topic_path, user_topic_path in cur.fetchall():
+        expected_topic_name = normalize_topic_part(topic_name or name, "fleet")
+        expected_topic_path = build_fleet_topic_path(user_topic_path or "default_site/default_group/user", expected_topic_name)
+        issues = []
+        if not user_topic_path:
+            issues.append("owner_user_topic_missing")
+        if not topic_name:
+            issues.append("fleet_topic_name_missing")
+        if not topic_path:
+            issues.append("fleet_topic_path_missing")
+        if topic_path and user_topic_path and not topic_path.startswith(f"{user_topic_path}/"):
+            issues.append("fleet_topic_outside_owner")
+        if repair_missing and ("fleet_topic_name_missing" in issues or "fleet_topic_path_missing" in issues):
+            cur.execute("""
+                UPDATE fleets
+                SET topic_name = COALESCE(NULLIF(trim(topic_name), ''), ?),
+                    topic_path = COALESCE(NULLIF(trim(topic_path), ''), ?),
+                    updated_at = ?
+                WHERE id = ?
+            """, (expected_topic_name, expected_topic_path, now, fleet_id))
+            repaired["fleets"] += 1
+            topic_name = topic_name or expected_topic_name
+            topic_path = topic_path or expected_topic_path
+            issues = [issue for issue in issues if issue not in ("fleet_topic_name_missing", "fleet_topic_path_missing")]
+        if issues:
+            fleet_issues.append({
+                "id": fleet_id,
+                "name": name,
+                "owner_user_id": owner_user_id,
+                "topic_name": topic_name,
+                "topic_path": topic_path,
+                "expected_topic_name": expected_topic_name,
+                "expected_topic_path": expected_topic_path,
+                "issues": issues,
+            })
+
+    cur.execute("""
+        SELECT d.id, d.device_id, d.device_name, d.device_type, d.fleet_id, d.owner_user_id,
+               d.topic_prefix, d.telemetry_topic, d.policy_topic,
+               f.owner_user_id, f.topic_path, u.user_topic_path
+        FROM devices d
+        LEFT JOIN fleets f ON f.id = d.fleet_id
+        LEFT JOIN users u ON u.id = d.owner_user_id
+        ORDER BY d.id
+    """)
+    device_issues = []
+    for row in cur.fetchall():
+        (
+            row_id, device_id, device_name, device_type, fleet_id, owner_user_id,
+            topic_prefix, telemetry_topic, policy_topic, fleet_owner_id, fleet_topic_path,
+            user_topic_path,
+        ) = row
+        expected_prefix = fleet_topic_path if fleet_id and fleet_topic_path else user_topic_path
+        expected_telemetry = build_device_telemetry_topic(expected_prefix or "", device_type, device_id) if expected_prefix else None
+        expected_policy = build_device_policy_topic(expected_prefix or "", device_id) if expected_prefix else None
+        issues = []
+        if not user_topic_path:
+            issues.append("owner_user_topic_missing")
+        if fleet_id and not fleet_topic_path:
+            issues.append("fleet_topic_missing")
+        if fleet_id and fleet_owner_id is not None and int(fleet_owner_id) != int(owner_user_id):
+            issues.append("fleet_owner_mismatch")
+        if not topic_prefix:
+            issues.append("device_topic_prefix_missing")
+        if not telemetry_topic:
+            issues.append("device_telemetry_topic_missing")
+        if not policy_topic:
+            issues.append("device_policy_topic_missing")
+        if topic_prefix and expected_prefix and topic_prefix != expected_prefix:
+            issues.append("custom_or_legacy_topic_prefix")
+
+        missing_topic_issue = any(issue in issues for issue in (
+            "device_topic_prefix_missing",
+            "device_telemetry_topic_missing",
+            "device_policy_topic_missing",
+        ))
+        if repair_missing and expected_prefix and missing_topic_issue:
+            next_prefix = topic_prefix or expected_prefix
+            cur.execute("""
+                UPDATE devices
+                SET topic_prefix = COALESCE(NULLIF(trim(topic_prefix), ''), ?),
+                    telemetry_topic = COALESCE(NULLIF(trim(telemetry_topic), ''), ?),
+                    policy_topic = COALESCE(NULLIF(trim(policy_topic), ''), ?),
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                next_prefix,
+                telemetry_topic or build_device_telemetry_topic(next_prefix, device_type, device_id),
+                policy_topic or build_device_policy_topic(next_prefix, device_id),
+                now,
+                row_id,
+            ))
+            repaired["devices"] += 1
+            topic_prefix = topic_prefix or next_prefix
+            telemetry_topic = telemetry_topic or build_device_telemetry_topic(next_prefix, device_type, device_id)
+            policy_topic = policy_topic or build_device_policy_topic(next_prefix, device_id)
+            issues = [issue for issue in issues if issue not in (
+                "device_topic_prefix_missing",
+                "device_telemetry_topic_missing",
+                "device_policy_topic_missing",
+            )]
+
+        if issues:
+            device_issues.append({
+                "id": row_id,
+                "device_id": device_id,
+                "device_name": device_name,
+                "owner_user_id": owner_user_id,
+                "fleet_id": fleet_id,
+                "topic_prefix": topic_prefix,
+                "telemetry_topic": telemetry_topic,
+                "policy_topic": policy_topic,
+                "expected_topic_prefix": expected_prefix,
+                "expected_telemetry_topic": expected_telemetry,
+                "expected_policy_topic": expected_policy,
+                "issues": issues,
+            })
+
+    if repair_missing:
+        conn.commit()
+    conn.close()
+    return {
+        "status": "ok",
+        "repair_missing": repair_missing,
+        "repaired": repaired,
+        "summary": {
+            "fleet_issue_count": len(fleet_issues),
+            "device_issue_count": len(device_issues),
+        },
+        "fleets": fleet_issues,
+        "devices": device_issues,
+    }
+
+
+def row_to_site(row):
+    return {
+        "id": row[0],
+        "name": row[1],
+        "topic_name": row[2],
+        "description": row[3],
+        "created_at": row[4],
+        "updated_at": row[5],
+    }
+
+
+def row_to_group(row):
+    return {
+        "id": row[0],
+        "site_id": row[1],
+        "site_name": row[2],
+        "site_topic_name": row[3],
+        "name": row[4],
+        "topic_name": row[5],
+        "topic_path": row[6],
+        "description": row[7],
+        "is_default": bool(row[8]),
+        "created_at": row[9],
+        "updated_at": row[10],
+    }
+
+
+def get_default_site_group(cur):
+    cur.execute("SELECT id, topic_name FROM sites WHERE name = ?", ("Default Site",))
+    site = cur.fetchone()
+    if not site:
+        timestamp = now_iso()
+        cur.execute("""
+            INSERT INTO sites (name, topic_name, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("Default Site", "default_site", "Default site for temporary and migrated users", timestamp, timestamp))
+        site_id = cur.lastrowid
+        site_topic = "default_site"
+    else:
+        site_id = site[0]
+        site_topic = site[1]
+
+    cur.execute("""
+        SELECT id, topic_path
+        FROM user_groups
+        WHERE site_id = ? AND is_default = 1
+        ORDER BY id
+        LIMIT 1
+    """, (site_id,))
+    group = cur.fetchone()
+    if not group:
+        timestamp = now_iso()
+        group_topic = "default_group"
+        group_path = f"{site_topic}/{group_topic}"
+        cur.execute("""
+            INSERT INTO user_groups
+            (site_id, name, topic_name, topic_path, description, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        """, (site_id, "Default Group", group_topic, group_path, "Default group for temporary and migrated users", timestamp, timestamp))
+        group_id = cur.lastrowid
+    else:
+        group_id = group[0]
+        group_path = group[1]
+    return site_id, group_id, group_path
+
+
+def fetch_group_for_site(cur, site_id, group_id):
+    cur.execute("""
+        SELECT g.id, g.topic_path, s.topic_name
+        FROM user_groups g
+        JOIN sites s ON s.id = g.site_id
+        WHERE g.id = ? AND g.site_id = ?
+    """, (group_id, site_id))
+    return cur.fetchone()
+
+
 def fetch_fleet_row(fleet_id):
     if not fleet_id:
         return None
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT f.id, f.name, f.description, f.owner_user_id, u.name, u.email, f.created_at, f.updated_at
+        SELECT f.id, f.name, f.description, f.owner_user_id, u.name, u.email,
+               f.topic_name, f.topic_path, f.created_at, f.updated_at,
+               fps.policy_json, fps.applied_at
         FROM fleets f
         LEFT JOIN users u ON u.id = f.owner_user_id
+        LEFT JOIN fleet_policy_state fps ON fps.fleet_id = f.id
         WHERE f.id = ?
     """, (fleet_id,))
     row = cur.fetchone()
@@ -229,8 +635,12 @@ def serialize_fleet(row):
         "owner_user_id": row[3],
         "owner_name": row[4],
         "owner_email": row[5],
-        "created_at": row[6],
-        "updated_at": row[7],
+        "topic_name": row[6],
+        "topic_path": row[7],
+        "created_at": row[8],
+        "updated_at": row[9],
+        "current_policy": safe_json_loads(row[10]) if len(row) > 10 else None,
+        "policy_applied_at": row[11] if len(row) > 11 else None,
     }
 
 
@@ -240,19 +650,31 @@ def serialize_device(row):
         "device_id": row[1],
         "device_name": row[2],
         "device_type": row[3],
-        "fleet_id": row[4],
-        "fleet_name": row[5],
-        "owner_user_id": row[6],
-        "owner_name": row[7],
-        "owner_email": row[8],
-        "status": row[9],
-        "topic_prefix": row[10],
-        "telemetry_topic": row[11],
-        "policy_topic": row[12],
-        "description": row[13],
-        "created_at": row[14],
-        "updated_at": row[15],
+        "device_os": row[4] or "raspberry_pi",
+        "fleet_id": row[5],
+        "fleet_name": row[6],
+        "owner_user_id": row[7],
+        "owner_name": row[8],
+        "owner_email": row[9],
+        "status": row[10],
+        "topic_prefix": row[11],
+        "telemetry_topic": row[12],
+        "policy_topic": row[13],
+        "description": row[14],
+        "created_at": row[15],
+        "updated_at": row[16],
+        "current_policy": safe_json_loads(row[17]) if len(row) > 17 else None,
+        "policy_applied_at": row[18] if len(row) > 18 else None,
     }
+
+
+def safe_json_loads(value):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 
 def log_access_event(event_type, email=None, user_id=None, failure_reason=None):
@@ -357,7 +779,7 @@ def load_current_user():
         return unauthorized_response()
     if g.current_user.get("status") != "ACTIVE":
         session.clear()
-        log_access_event("LOGIN_FAIL", email=g.current_user.get("email"), user_id=g.current_user.get("id"), failure_reason="SUSPENDED")
+        log_access_event("LOGIN_FAIL", email=g.current_user.get("email"), user_id=g.current_user.get("id"), failure_reason=g.current_user.get("status"))
         return unauthorized_response()
     if wants_admin(request.path) and g.current_user.get("role") != "ADMIN":
         return forbidden_response()
@@ -622,6 +1044,7 @@ def get_db_connection():
         os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_NAME, timeout=DB_BUSY_TIMEOUT_MS / 1000)
     conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -687,6 +1110,66 @@ def get_database_stats():
     }
 
 
+def assert_port_available(port, host="0.0.0.0"):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, int(port)))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Port {port} is already in use. Stop the conflicting process "
+            f"or run with a different PORT value."
+        ) from exc
+
+
+def check_db_file_health():
+    if not os.path.exists(DB_NAME):
+        return {"status": "missing", "db_name": DB_NAME}
+    conn = sqlite3.connect(DB_NAME, timeout=DB_BUSY_TIMEOUT_MS / 1000)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+        result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if result != "ok":
+            raise RuntimeError(f"Database integrity check failed: {result}")
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        return {
+            "status": "ok",
+            "db_name": DB_NAME,
+            "journal_mode": journal_mode,
+            "size_bytes": os.path.getsize(DB_NAME),
+        }
+    finally:
+        conn.close()
+
+
+def validate_required_tables():
+    required = {
+        "users",
+        "sites",
+        "user_groups",
+        "fleets",
+        "devices",
+        "sensor_definitions",
+        "sensor_data",
+        "unknown_payload_data",
+        "unknown_schema_profile",
+        "usi_schema_definitions",
+        "apr_policy_log",
+        "policy_deployment_log",
+        "device_policy_state",
+        "fleet_policy_state",
+    }
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        existing = {row[0] for row in rows}
+        missing = sorted(required - existing)
+        if missing:
+            raise RuntimeError(f"Required DB tables are missing: {missing}")
+        return {"status": "ok", "table_count": len(existing)}
+    finally:
+        conn.close()
+
+
 def add_column_if_missing(cur, table_name, column_name, column_type):
     cur.execute(f"PRAGMA table_info({table_name})")
     columns = [row[1] for row in cur.fetchall()]
@@ -698,7 +1181,7 @@ def init_db():
     conn = get_db_connection()
     conn.execute(f"PRAGMA journal_mode={DB_JOURNAL_MODE}")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
     cur = conn.cursor()
 
     cur.execute("""
@@ -828,6 +1311,11 @@ def init_db():
             last_topic TEXT,
             schema_keys TEXT,
             key_count INTEGER,
+            inferred_fields TEXT,
+            semantic_summary TEXT,
+            recommended_mapping TEXT,
+            confidence_score REAL,
+            storage_strategy TEXT,
             sample_payload_text TEXT,
             message_count INTEGER DEFAULT 0,
             total_bytes INTEGER DEFAULT 0,
@@ -835,6 +1323,49 @@ def init_db():
             last_seen TEXT
         )
     """)
+    for col, typ in [
+        ("inferred_fields", "TEXT"),
+        ("semantic_summary", "TEXT"),
+        ("recommended_mapping", "TEXT"),
+        ("confidence_score", "REAL"),
+        ("storage_strategy", "TEXT"),
+    ]:
+        add_column_if_missing(cur, "unknown_schema_profile", col, typ)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usi_schema_definitions (
+            schema_hash TEXT PRIMARY KEY,
+            display_name TEXT,
+            target_type TEXT NOT NULL DEFAULT 'sensor_data',
+            status TEXT NOT NULL DEFAULT 'DRAFT',
+            field_mapping TEXT NOT NULL,
+            storage_strategy TEXT,
+            scope_type TEXT NOT NULL DEFAULT 'global',
+            scope_id TEXT,
+            notes TEXT,
+            created_by_user_id INTEGER,
+            approved_by_user_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            approved_at TEXT,
+            FOREIGN KEY(schema_hash) REFERENCES unknown_schema_profile(schema_hash)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usi_def_status ON usi_schema_definitions(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usi_def_target ON usi_schema_definitions(target_type)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usi_mapping_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schema_hash TEXT NOT NULL,
+            action TEXT NOT NULL,
+            actor_user_id INTEGER,
+            detail_json TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usi_audit_schema ON usi_mapping_audit_log(schema_hash)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usi_audit_created ON usi_mapping_audit_log(created_at)")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS voice_experiment_results (
@@ -903,6 +1434,37 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schema_profile_last_seen ON unknown_schema_profile(last_seen)")
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS sites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            topic_name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sites_topic ON sites(topic_name)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            topic_name TEXT NOT NULL,
+            topic_path TEXT NOT NULL,
+            description TEXT,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            FOREIGN KEY(site_id) REFERENCES sites(id)
+        )
+    """)
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_groups_site_name ON user_groups(site_id, name)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_groups_site_topic ON user_groups(site_id, topic_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_groups_site ON user_groups(site_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_groups_topic_path ON user_groups(topic_path)")
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -915,9 +1477,18 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+    for col, typ in [
+        ("site_id", "INTEGER"),
+        ("group_id", "INTEGER"),
+        ("user_topic_name", "TEXT"),
+        ("user_topic_path", "TEXT"),
+    ]:
+        add_column_if_missing(cur, "users", col, typ)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_site ON users(site_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_group ON users(group_id)")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS access_logs (
@@ -955,13 +1526,21 @@ def init_db():
             name TEXT NOT NULL,
             description TEXT,
             owner_user_id INTEGER NOT NULL,
+            topic_name TEXT,
+            topic_path TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT,
             FOREIGN KEY(owner_user_id) REFERENCES users(id)
         )
     """)
+    for col, typ in [
+        ("topic_name", "TEXT"),
+        ("topic_path", "TEXT"),
+    ]:
+        add_column_if_missing(cur, "fleets", col, typ)
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fleets_owner_name ON fleets(owner_user_id, name)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fleets_owner ON fleets(owner_user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fleets_topic_path ON fleets(topic_path)")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS devices (
@@ -969,6 +1548,7 @@ def init_db():
             device_id TEXT NOT NULL UNIQUE,
             device_name TEXT NOT NULL,
             device_type TEXT,
+            device_os TEXT,
             fleet_id INTEGER,
             owner_user_id INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -982,10 +1562,99 @@ def init_db():
             FOREIGN KEY(owner_user_id) REFERENCES users(id)
         )
     """)
+    add_column_if_missing(cur, "devices", "device_os", "TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_owner ON devices(owner_user_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_fleet ON devices(fleet_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_device_id ON devices(device_id)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sensor_definitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sensor_id TEXT NOT NULL UNIQUE,
+            sensor_type TEXT NOT NULL,
+            unit TEXT,
+            topic TEXT NOT NULL UNIQUE,
+            definition_source TEXT NOT NULL DEFAULT 'SIMULATOR',
+            owner_user_id INTEGER,
+            payload_schema_mode TEXT NOT NULL DEFAULT 'defined_sensor',
+            policy TEXT NOT NULL DEFAULT 'none',
+            min_value REAL,
+            max_value REAL,
+            start_value REAL,
+            step_value REAL,
+            interval_seconds REAL,
+            simulation_mode TEXT,
+            color_rule_json TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            FOREIGN KEY(owner_user_id) REFERENCES users(id)
+        )
+    """)
+    add_column_if_missing(cur, "sensor_definitions", "definition_source", "TEXT NOT NULL DEFAULT 'SIMULATOR'")
+    add_column_if_missing(cur, "sensor_definitions", "owner_user_id", "INTEGER")
+    cur.execute("""
+        UPDATE sensor_definitions
+        SET definition_source = 'SIMULATOR'
+        WHERE definition_source IS NULL OR TRIM(definition_source) = ''
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sensor_definitions_type ON sensor_definitions(sensor_type)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sensor_definitions_enabled ON sensor_definitions(enabled)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sensor_definitions_topic ON sensor_definitions(topic)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sensor_definitions_source ON sensor_definitions(definition_source)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sensor_definitions_owner ON sensor_definitions(owner_user_id)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS device_policy_state (
+            device_row_id INTEGER PRIMARY KEY,
+            policy_json TEXT NOT NULL,
+            source TEXT NOT NULL,
+            applied_by_user_id INTEGER,
+            applied_at TEXT NOT NULL,
+            published_topic TEXT,
+            publish_status TEXT NOT NULL,
+            last_error TEXT,
+            FOREIGN KEY(device_row_id) REFERENCES devices(id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_device_policy_applied ON device_policy_state(applied_at)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fleet_policy_state (
+            fleet_id INTEGER PRIMARY KEY,
+            policy_json TEXT NOT NULL,
+            source TEXT NOT NULL,
+            applied_by_user_id INTEGER,
+            applied_at TEXT NOT NULL,
+            publish_status TEXT NOT NULL,
+            last_error TEXT,
+            FOREIGN KEY(fleet_id) REFERENCES fleets(id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fleet_policy_applied ON fleet_policy_state(applied_at)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS policy_deployment_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_type TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            device_row_id INTEGER,
+            device_id TEXT,
+            policy_json TEXT NOT NULL,
+            source TEXT NOT NULL,
+            published_topic TEXT,
+            publish_status TEXT NOT NULL,
+            last_error TEXT,
+            actor_user_id INTEGER,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_policy_log_target ON policy_deployment_log(target_type, target_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_policy_log_device ON policy_deployment_log(device_row_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_policy_log_created ON policy_deployment_log(created_at)")
+
+    default_site_id, default_group_id, default_group_path = get_default_site_group(cur)
 
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
@@ -995,8 +1664,10 @@ def init_db():
         user_password = os.environ.get("IOT_USER_PASSWORD", "user1234")
         created_at = now_iso()
         cur.execute("""
-            INSERT INTO users (name, email, password_hash, company, phone, role, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users
+            (name, email, password_hash, company, phone, role, status, site_id, group_id,
+             user_topic_name, user_topic_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             "Administrator",
             admin_email,
@@ -1005,11 +1676,17 @@ def init_db():
             "",
             "ADMIN",
             "ACTIVE",
+            default_site_id,
+            default_group_id,
+            default_user_topic_name("Administrator"),
+            build_user_topic_path(default_group_path, default_user_topic_name("Administrator")),
             created_at,
         ))
         cur.execute("""
-            INSERT INTO users (name, email, password_hash, company, phone, role, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users
+            (name, email, password_hash, company, phone, role, status, site_id, group_id,
+             user_topic_name, user_topic_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             "General User",
             user_email,
@@ -1018,7 +1695,43 @@ def init_db():
             "",
             "USER",
             "ACTIVE",
+            default_site_id,
+            default_group_id,
+            default_user_topic_name("General User"),
+            build_user_topic_path(default_group_path, default_user_topic_name("General User")),
             created_at,
+        ))
+
+    cur.execute("""
+        SELECT u.id, u.name
+        FROM users u
+        LEFT JOIN user_groups g ON g.id = u.group_id
+        WHERE u.site_id IS NULL
+           OR u.group_id IS NULL
+           OR g.id IS NULL
+           OR u.user_topic_name IS NULL
+           OR trim(u.user_topic_name) = ''
+           OR u.user_topic_path IS NULL
+           OR trim(u.user_topic_path) = ''
+    """)
+    for user_id, user_name in cur.fetchall():
+        topic_name = default_user_topic_name(user_name)
+        cur.execute("""
+            UPDATE users
+            SET site_id = COALESCE(site_id, ?),
+                group_id = ?,
+                user_topic_name = CASE
+                    WHEN user_topic_name IS NULL OR trim(user_topic_name) = '' THEN ?
+                    ELSE user_topic_name
+                END,
+                user_topic_path = ?
+            WHERE id = ?
+        """, (
+            default_site_id,
+            default_group_id,
+            topic_name,
+            build_user_topic_path(default_group_path, topic_name),
+            user_id,
         ))
 
     cur.execute("""
@@ -1027,8 +1740,66 @@ def init_db():
         FROM users
     """, (now_iso(), now_iso()))
 
+    cur.execute("""
+        SELECT f.id, f.name, u.user_topic_path
+        FROM fleets f
+        JOIN users u ON u.id = f.owner_user_id
+        WHERE f.topic_name IS NULL
+           OR trim(f.topic_name) = ''
+           OR f.topic_path IS NULL
+           OR trim(f.topic_path) = ''
+    """)
+    for fleet_id, fleet_name, user_topic_path in cur.fetchall():
+        topic_name = normalize_topic_part(fleet_name, "fleet")
+        topic_path = build_fleet_topic_path(user_topic_path or default_group_path, fleet_name)
+        cur.execute("""
+            UPDATE fleets
+            SET topic_name = ?, topic_path = ?, updated_at = COALESCE(updated_at, ?)
+            WHERE id = ?
+        """, (topic_name, topic_path, now_iso(), fleet_id))
+
+    config = load_config()
+    legacy_sensors = config.get("sensors", [])
+    cur.execute("SELECT COUNT(*) FROM sensor_definitions")
+    if cur.fetchone()[0] == 0:
+        for sensor in legacy_sensors:
+            sensor_id = str(sensor.get("id") or "").strip()
+            sensor_type = str(sensor.get("type") or "").strip()
+            if not sensor_id or not sensor_type:
+                continue
+            topic = str(sensor.get("topic") or "").strip()
+            if not topic:
+                topic = f"{config.get('mqtt', {}).get('topic_prefix', 'iot/sensor')}/{sensor_type}/{sensor_id}"
+            cur.execute("""
+                INSERT OR IGNORE INTO sensor_definitions
+                (sensor_id, sensor_type, unit, topic, definition_source, owner_user_id,
+                 payload_schema_mode, policy,
+                 min_value, max_value, start_value, step_value, interval_seconds,
+                 simulation_mode, color_rule_json, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'SIMULATOR', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """, (
+                sensor_id,
+                sensor_type,
+                sensor.get("unit"),
+                topic,
+                sensor.get("payload_schema_mode") or "defined_sensor",
+                sensor.get("policy") or "none",
+                sensor.get("min"),
+                sensor.get("max"),
+                sensor.get("start"),
+                sensor.get("step"),
+                sensor.get("interval"),
+                sensor.get("mode"),
+                json.dumps(sensor.get("color_rule"), ensure_ascii=False) if sensor.get("color_rule") else None,
+                now_iso(),
+                now_iso(),
+            ))
+
     conn.commit()
     conn.close()
+    if "sensors" in config:
+        config.pop("sensors", None)
+        save_config(config)
 
 
 def flatten_schema_keys(value, prefix=""):
@@ -1065,24 +1836,282 @@ def get_schema_keys_text(data):
     return json.dumps(keys, ensure_ascii=False)
 
 
-def upsert_unknown_schema_profile(meta, payload_type, payload_text, data=None):
-    if db_manager:
-        db_manager.upsert_unknown_schema_profile(meta, payload_type, payload_text, data)
-        return
+SEMANTIC_ALIASES = {
+    "sensor_id": ("sensor_id", "sensor", "sensorid", "id", "device_id", "deviceid", "client_id"),
+    "sensor_type": ("sensor_type", "type", "kind", "metric", "metric_name"),
+    "value": ("value", "val", "reading", "measurement", "data", "temperature", "temp", "humidity", "humi", "pressure", "vibration", "cpu", "memory", "mem"),
+    "unit": ("unit", "units", "uom"),
+    "timestamp": ("timestamp", "time", "ts", "publish_timestamp", "created_at", "datetime"),
+    "sequence": ("seq", "sequence", "sequence_id", "counter"),
+    "policy": ("policy", "qos", "compression", "encryption", "integrity"),
+    "system_cpu": ("cpu", "cpu_percent", "cpu_usage", "load"),
+    "system_memory": ("memory", "mem", "ram", "memory_percent", "mem_usage"),
+    "system_temperature": ("temperature", "temp", "cpu_temp", "board_temp"),
+}
 
+
+def semantic_role_for_path(path):
+    leaf = path.split(".")[-1].replace("[]", "").lower()
+    normalized = re.sub(r"[^a-z0-9_]", "_", leaf)
+    for role, aliases in SEMANTIC_ALIASES.items():
+        if normalized in aliases:
+            return role
+    for role, aliases in SEMANTIC_ALIASES.items():
+        if any(alias and alias in normalized for alias in aliases if len(alias) >= 3):
+            return role
+    return "unknown"
+
+
+def infer_value_type(value):
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "string"
+        try:
+            float(stripped)
+            return "numeric_string"
+        except ValueError:
+            return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def collect_inferred_fields(value, prefix=""):
+    fields = []
+    if isinstance(value, dict):
+        for key in sorted(value.keys()):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            child = value[key]
+            if isinstance(child, dict):
+                fields.append({
+                    "path": path,
+                    "type": "object",
+                    "semantic_role": semantic_role_for_path(path),
+                    "sample": None,
+                })
+                fields.extend(collect_inferred_fields(child, path))
+            elif isinstance(child, list):
+                sample = child[0] if child else None
+                fields.append({
+                    "path": f"{path}[]",
+                    "type": f"array<{infer_value_type(sample)}>",
+                    "semantic_role": semantic_role_for_path(path),
+                    "sample": sample if not isinstance(sample, (dict, list)) else None,
+                })
+                if isinstance(sample, (dict, list)):
+                    fields.extend(collect_inferred_fields(sample, f"{path}[]"))
+            else:
+                fields.append({
+                    "path": path,
+                    "type": infer_value_type(child),
+                    "semantic_role": semantic_role_for_path(path),
+                    "sample": child,
+                })
+    return fields
+
+
+def build_semantic_summary(fields):
+    roles = {}
+    for field in fields:
+        role = field.get("semantic_role") or "unknown"
+        roles.setdefault(role, 0)
+        roles[role] += 1
+    known_roles = sorted([role for role in roles if role != "unknown"])
+    return {
+        "known_roles": known_roles,
+        "unknown_field_count": roles.get("unknown", 0),
+        "field_count": len(fields),
+        "role_counts": roles,
+    }
+
+
+def build_recommended_mapping(fields, data):
+    by_role = {}
+    for field in fields:
+        role = field.get("semantic_role")
+        if role and role != "unknown":
+            by_role.setdefault(role, field)
+
+    mapping = {}
+    confidence = 0.15
+    if "sensor_id" in by_role:
+        mapping["sensor_id"] = by_role["sensor_id"]["path"]
+        confidence += 0.2
+    if "sensor_type" in by_role:
+        mapping["sensor_type"] = by_role["sensor_type"]["path"]
+        confidence += 0.15
+    if "value" in by_role:
+        mapping["value"] = by_role["value"]["path"]
+        confidence += 0.25
+    if "unit" in by_role:
+        mapping["unit"] = by_role["unit"]["path"]
+        confidence += 0.1
+    if "timestamp" in by_role:
+        mapping["timestamp"] = by_role["timestamp"]["path"]
+        confidence += 0.1
+    if any(role in by_role for role in ("system_cpu", "system_memory", "system_temperature")):
+        confidence += 0.1
+        mapping["profile"] = "system_metrics"
+
+    storage_strategy = "unknown_payload_data"
+    promotion = "none"
+    if {"sensor_id", "value"}.issubset(mapping.keys()):
+        storage_strategy = "sensor_data_candidate"
+        promotion = "defined_sensor_candidate"
+    elif mapping.get("profile") == "system_metrics":
+        storage_strategy = "system_metrics_candidate"
+        promotion = "device_metrics_candidate"
+    elif isinstance(data, dict):
+        storage_strategy = "flexible_json_profile"
+
+    return {
+        "promotion": promotion,
+        "storage_strategy": storage_strategy,
+        "field_mapping": mapping,
+        "confidence": round(min(confidence, 0.98), 3),
+        "notes": "Review before promoting unknown payloads to a defined schema.",
+    }
+
+
+def infer_unknown_schema(data, payload_text, payload_type, meta=None):
+    fields = collect_inferred_fields(data) if isinstance(data, dict) else []
+    summary = build_semantic_summary(fields)
+    mapping = build_recommended_mapping(fields, data) if isinstance(data, dict) else {
+        "promotion": "none",
+        "storage_strategy": "raw_payload",
+        "field_mapping": {},
+        "confidence": 0.05,
+        "notes": "Payload is not JSON; store as raw payload.",
+    }
+    return {
+        "fields": fields,
+        "summary": summary,
+        "mapping": mapping,
+        "confidence": mapping.get("confidence", 0.0),
+        "storage_strategy": mapping.get("storage_strategy", "unknown_payload_data"),
+    }
+
+
+USI_ALLOWED_TARGET_TYPES = {
+    "sensor_data",
+    "device_metrics",
+    "adaptive_json",
+    "raw_payload",
+}
+
+
+USI_ALLOWED_STATUSES = {
+    "DRAFT",
+    "APPROVED",
+    "REJECTED",
+}
+
+
+def fetch_usi_definition(schema_hash):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT schema_hash, display_name, target_type, status, field_mapping,
+               storage_strategy, scope_type, scope_id, notes, created_by_user_id,
+               approved_by_user_id, created_at, updated_at, approved_at
+        FROM usi_schema_definitions
+        WHERE schema_hash = ?
+    """, (schema_hash,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "schema_hash": row[0],
+        "display_name": row[1],
+        "target_type": row[2],
+        "status": row[3],
+        "field_mapping": safe_json_loads(row[4]) or {},
+        "storage_strategy": row[5],
+        "scope_type": row[6],
+        "scope_id": row[7],
+        "notes": row[8],
+        "created_by_user_id": row[9],
+        "approved_by_user_id": row[10],
+        "created_at": row[11],
+        "updated_at": row[12],
+        "approved_at": row[13],
+    }
+
+
+def validate_usi_definition_payload(data, require_mapping=True):
+    target_type = (data.get("target_type") or "sensor_data").strip()
+    if target_type not in USI_ALLOWED_TARGET_TYPES:
+        raise ValueError("invalid_target_type")
+    field_mapping = data.get("field_mapping") or {}
+    if not isinstance(field_mapping, dict):
+        raise ValueError("invalid_field_mapping")
+    if require_mapping and target_type == "sensor_data":
+        required = ("sensor_id", "value")
+        missing = [key for key in required if not field_mapping.get(key)]
+        if missing:
+            raise ValueError(f"missing_required_mapping:{','.join(missing)}")
+    if require_mapping and target_type == "device_metrics":
+        if not any(field_mapping.get(key) for key in ("cpu", "memory", "temperature", "value")):
+            raise ValueError("missing_device_metric_mapping")
+    scope_type = (data.get("scope_type") or "global").strip()
+    if scope_type not in ("global", "site", "group", "user", "fleet", "device"):
+        raise ValueError("invalid_scope_type")
+    return {
+        "display_name": (data.get("display_name") or "").strip(),
+        "target_type": target_type,
+        "field_mapping": field_mapping,
+        "storage_strategy": (data.get("storage_strategy") or target_type).strip(),
+        "scope_type": scope_type,
+        "scope_id": str(data.get("scope_id") or "").strip() or None,
+        "notes": (data.get("notes") or "").strip(),
+    }
+
+
+def log_usi_mapping_action(cur, schema_hash, action, detail=None):
+    cur.execute("""
+        INSERT INTO usi_mapping_audit_log
+        (schema_hash, action, actor_user_id, detail_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        schema_hash,
+        action,
+        current_user_id(),
+        json.dumps(detail or {}, ensure_ascii=False),
+        now_iso(),
+    ))
+
+
+def upsert_unknown_schema_profile(meta, payload_type, payload_text, data=None):
     schema_hash = meta.get("schema_hash") or calc_payload_fingerprint(payload_text)
     received_at = meta.get("received_timestamp") or now_iso()
     schema_keys = get_schema_keys_text(data) if isinstance(data, dict) else ""
     key_count = len(json.loads(schema_keys)) if schema_keys else 0
     payload_size = int(meta.get("payload_size") or len(payload_text.encode("utf-8")))
+    inference = infer_unknown_schema(data, payload_text, payload_type, meta)
+    inferred_fields = json.dumps(inference["fields"], ensure_ascii=False)
+    semantic_summary = json.dumps(inference["summary"], ensure_ascii=False)
+    recommended_mapping = json.dumps(inference["mapping"], ensure_ascii=False)
 
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO unknown_schema_profile
         (schema_hash, payload_type, first_topic, last_topic, schema_keys, key_count,
-         sample_payload_text, message_count, total_bytes, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         inferred_fields, semantic_summary, recommended_mapping, confidence_score,
+         storage_strategy, sample_payload_text, message_count, total_bytes, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         ON CONFLICT(schema_hash) DO UPDATE SET
             payload_type = excluded.payload_type,
             last_topic = excluded.last_topic,
@@ -1094,6 +2123,11 @@ def upsert_unknown_schema_profile(meta, payload_type, payload_text, data=None):
                 WHEN excluded.key_count > 0 THEN excluded.key_count
                 ELSE unknown_schema_profile.key_count
             END,
+            inferred_fields = excluded.inferred_fields,
+            semantic_summary = excluded.semantic_summary,
+            recommended_mapping = excluded.recommended_mapping,
+            confidence_score = excluded.confidence_score,
+            storage_strategy = excluded.storage_strategy,
             sample_payload_text = CASE
                 WHEN unknown_schema_profile.sample_payload_text IS NULL OR unknown_schema_profile.sample_payload_text = ''
                 THEN excluded.sample_payload_text
@@ -1109,6 +2143,11 @@ def upsert_unknown_schema_profile(meta, payload_type, payload_text, data=None):
         meta.get("topic"),
         schema_keys,
         key_count,
+        inferred_fields,
+        semantic_summary,
+        recommended_mapping,
+        inference["confidence"],
+        inference["storage_strategy"],
         payload_text[:2000],
         payload_size,
         received_at,
@@ -1126,7 +2165,7 @@ def normalize_policy(policy):
     if not isinstance(policy, dict):
         return None
     return {
-        "qos": int(policy.get("qos", 0)),
+        "qos": int(policy.get("qos", 0) or 0),
         "compression": policy.get("compression", "none") or "none",
         "encryption": policy.get("encryption", "none") or "none",
         "integrity": policy.get("integrity", "none") or "none",
@@ -1137,10 +2176,17 @@ def policies_equal(left, right):
     return normalize_policy(left) == normalize_policy(right)
 
 
-def publish_policy_to_device(sensor_id, policy):
+def publish_policy_to_topic(policy_topic, policy):
     config = load_config()
-    policy_topic = f"iot/sensor/policy/{sensor_id}"
     normalized = normalize_policy(policy)
+    if normalized is None:
+        raise ValueError("invalid_policy")
+    if apr_mqtt_client and apr_mqtt_client.is_connected():
+        result = apr_mqtt_client.publish(policy_topic, json.dumps(normalized), qos=1)
+        result.wait_for_publish(timeout=5)
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            return policy_topic, normalized
+        raise ConnectionError(f"active MQTT client publish failed: rc={result.rc}")
     if publish_single_to_any_broker:
         publish_single_to_any_broker(policy_topic, json.dumps(normalized), config.get("mqtt", {}), qos=1)
     else:
@@ -1153,6 +2199,142 @@ def publish_policy_to_device(sensor_id, policy):
             qos=1
         )
     return policy_topic, normalized
+
+
+def publish_policy_to_device(sensor_id, policy):
+    policy_topic = f"iot/sensor/policy/{sensor_id}"
+    return publish_policy_to_topic(policy_topic, policy)
+
+
+def validate_policy_payload(policy):
+    normalized = normalize_policy(policy)
+    if normalized is None:
+        raise ValueError("policy_required")
+    if normalized["qos"] not in (0, 1, 2):
+        raise ValueError("invalid_qos")
+    if normalized["compression"] not in ("none", "gzip", "zlib", "bz2"):
+        raise ValueError("invalid_compression")
+    if normalized["encryption"] not in ("none", "AES-GCM", "ChaCha20-Poly1305"):
+        raise ValueError("invalid_encryption")
+    if normalized["integrity"] not in ("none", "sha256", "SHA-256"):
+        raise ValueError("invalid_integrity")
+    if normalized["integrity"] == "SHA-256":
+        normalized["integrity"] = "sha256"
+    return normalized
+
+
+def recommend_policy_from_runtime(data, topic):
+    if apr_engine is None:
+        raise RuntimeError("apr_engine_not_available")
+    payload_size = int(data.get("payload_size") or data.get("data_size_pub") or 0)
+    network_latency_ms = float(data.get("network_latency_ms") or data.get("pub_ping") or 0.0)
+    queue_depth = int(data.get("queue_depth") or get_combined_queue_depth())
+    schema_type = data.get("schema_type") or "standard"
+    return validate_policy_payload(apr_engine.recommend(payload_size, network_latency_ms, queue_depth, topic, schema_type))
+
+
+def fetch_device_policy_target(row_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT d.id, d.device_id, d.device_name, d.fleet_id, d.owner_user_id,
+               d.policy_topic, d.topic_prefix, d.telemetry_topic
+        FROM devices d
+        WHERE d.id = ?
+    """, (row_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "device_id": row[1],
+        "device_name": row[2],
+        "fleet_id": row[3],
+        "owner_user_id": row[4],
+        "policy_topic": row[5] or f"{POLICY_TOPIC_PREFIX}{row[1]}",
+        "topic_prefix": row[6],
+        "telemetry_topic": row[7],
+    }
+
+
+def fetch_fleet_policy_target(fleet_id):
+    row = fetch_fleet_row(fleet_id)
+    if not row:
+        return None
+    return serialize_fleet(row)
+
+
+def log_policy_deployment(cur, target_type, target_id, device, policy, source, topic, status, error):
+    cur.execute("""
+        INSERT INTO policy_deployment_log
+        (target_type, target_id, device_row_id, device_id, policy_json, source,
+         published_topic, publish_status, last_error, actor_user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        target_type,
+        target_id,
+        device.get("id") if device else None,
+        device.get("device_id") if device else None,
+        json.dumps(policy, ensure_ascii=False),
+        source,
+        topic,
+        status,
+        error,
+        current_user_id(),
+        now_iso(),
+    ))
+
+
+def apply_policy_to_device_target(device, policy, source="manual"):
+    topic = device.get("policy_topic") or f"{POLICY_TOPIC_PREFIX}{device['device_id']}"
+    status = "success"
+    error = None
+    published_topic = topic
+    normalized = validate_policy_payload(policy)
+    try:
+        published_topic, normalized = publish_policy_to_topic(topic, normalized)
+        apr_policy_cache[device["device_id"]] = normalized
+    except Exception as exc:
+        status = "failed"
+        error = str(exc)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO device_policy_state
+        (device_row_id, policy_json, source, applied_by_user_id, applied_at,
+         published_topic, publish_status, last_error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(device_row_id) DO UPDATE SET
+            policy_json = excluded.policy_json,
+            source = excluded.source,
+            applied_by_user_id = excluded.applied_by_user_id,
+            applied_at = excluded.applied_at,
+            published_topic = excluded.published_topic,
+            publish_status = excluded.publish_status,
+            last_error = excluded.last_error
+    """, (
+        device["id"],
+        json.dumps(normalized, ensure_ascii=False),
+        source,
+        current_user_id(),
+        now_iso(),
+        published_topic,
+        status,
+        error,
+    ))
+    log_policy_deployment(cur, "device", device["id"], device, normalized, source, published_topic, status, error)
+    conn.commit()
+    conn.close()
+    return {
+        "device_id": device["device_id"],
+        "device_row_id": device["id"],
+        "policy": normalized,
+        "published_topic": published_topic,
+        "publish_status": status,
+        "last_error": error,
+    }
 
 
 def get_policy(data):
@@ -1729,7 +2911,9 @@ def login():
         log_access_event("LOGIN_FAIL", email=email, failure_reason="INVALID_CREDENTIALS")
         return render_template("login.html", error="Email or password is incorrect.", next_url=next_url), 401
     if user.get("status") != "ACTIVE":
-        log_access_event("LOGIN_FAIL", email=email, user_id=user["id"], failure_reason="SUSPENDED")
+        log_access_event("LOGIN_FAIL", email=email, user_id=user["id"], failure_reason=user.get("status"))
+        if user.get("status") == "PENDING":
+            return render_template("login.html", error="관리자 승인 대기 중인 계정입니다.", next_url=next_url), 403
         return render_template("login.html", error="This account is suspended.", next_url=next_url), 403
 
     session.clear()
@@ -1737,6 +2921,56 @@ def login():
     session["role"] = user["role"]
     log_access_event("LOGIN_SUCCESS", email=email, user_id=user["id"])
     return redirect(next_url)
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        return render_template("register.html", error=None, message=None)
+
+    name = (request.form.get("name") or "").strip()
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    company = (request.form.get("company") or "").strip()
+    phone = (request.form.get("phone") or "").strip()
+    if not name or not email or not password:
+        return render_template("register.html", error="Name, email, and password are required.", message=None), 400
+    if len(password) < 4:
+        return render_template("register.html", error="Password must be at least 4 characters.", message=None), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    site_id, group_id, group_topic_path = get_default_site_group(cur)
+    user_topic_name = default_user_topic_name(name)
+    user_topic_path = build_user_topic_path(group_topic_path, user_topic_name)
+    try:
+        cur.execute("""
+            INSERT INTO users
+            (name, email, password_hash, company, phone, role, status, site_id, group_id,
+             user_topic_name, user_topic_path, created_at)
+            VALUES (?, ?, ?, ?, ?, 'USER', 'PENDING', ?, ?, ?, ?, ?)
+        """, (
+            name,
+            email,
+            generate_password_hash(password),
+            company,
+            phone,
+            site_id,
+            group_id,
+            user_topic_name,
+            user_topic_path,
+            now_iso(),
+        ))
+        user_id = cur.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return render_template("register.html", error="Email already exists.", message=None), 400
+    conn.close()
+
+    log_access_event("REGISTER_PENDING", email=email, user_id=user_id)
+    log_audit_event("USER_REGISTERED_PENDING", "users", user_id, {"email": email, "site_id": site_id, "group_id": group_id}, actor_user_id=None)
+    return render_template("register.html", error=None, message="가입 신청이 완료되었습니다. 관리자 승인 후 로그인할 수 있습니다.")
 
 
 @app.route("/logout")
@@ -1761,9 +2995,14 @@ def admin_users():
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, name, email, company, phone, role, status, created_at
-        FROM users
-        ORDER BY id
+        SELECT u.id, u.name, u.email, u.company, u.phone, u.role, u.status, u.created_at,
+               u.site_id, s.name, s.topic_name,
+               u.group_id, g.name, g.topic_path,
+               u.user_topic_name, u.user_topic_path
+        FROM users u
+        LEFT JOIN sites s ON s.id = u.site_id
+        LEFT JOIN user_groups g ON g.id = u.group_id
+        ORDER BY s.name, g.name, u.name, u.id
     """)
     users = [
         {
@@ -1775,11 +3014,29 @@ def admin_users():
             "role": r[5],
             "status": r[6],
             "created_at": r[7],
+            "site_id": r[8],
+            "site_name": r[9],
+            "site_topic_name": r[10],
+            "group_id": r[11],
+            "group_name": r[12],
+            "group_topic_path": r[13],
+            "user_topic_name": r[14],
+            "user_topic_path": r[15],
         }
         for r in cur.fetchall()
     ]
+    cur.execute("SELECT id, name, topic_name, description, created_at, updated_at FROM sites ORDER BY name")
+    sites = [row_to_site(r) for r in cur.fetchall()]
+    cur.execute("""
+        SELECT g.id, g.site_id, s.name, s.topic_name, g.name, g.topic_name, g.topic_path,
+               g.description, g.is_default, g.created_at, g.updated_at
+        FROM user_groups g
+        JOIN sites s ON s.id = g.site_id
+        ORDER BY s.name, g.is_default DESC, g.name
+    """)
+    groups = [row_to_group(r) for r in cur.fetchall()]
     conn.close()
-    return render_template("admin_users.html", users=users)
+    return render_template("admin_users.html", users=users, sites=sites, groups=groups)
 
 
 @app.route("/admin/access-logs")
@@ -1819,7 +3076,7 @@ def api_admin_update_user_status(user_id):
         return jsonify({"error": "cannot_change_own_status"}), 400
     data = request.get_json(silent=True) or {}
     status = str(data.get("status", "")).upper()
-    if status not in ("ACTIVE", "SUSPENDED"):
+    if status not in USER_STATUSES:
         return jsonify({"error": "invalid_status"}), 400
 
     conn = get_db_connection()
@@ -1834,9 +3091,210 @@ def api_admin_update_user_status(user_id):
     conn.commit()
     conn.close()
 
-    action = "USER_ACTIVATED" if status == "ACTIVE" else "USER_SUSPENDED"
+    if status == "ACTIVE" and old_status == "PENDING":
+        action = "USER_APPROVED"
+    elif status == "ACTIVE":
+        action = "USER_ACTIVATED"
+    elif status == "PENDING":
+        action = "USER_MARKED_PENDING"
+    else:
+        action = "USER_SUSPENDED"
     log_audit_event(action, "users", user_id, {"email": row[1], "old_status": old_status, "new_status": status})
     return jsonify({"status": "ok", "user_id": user_id, "new_status": status})
+
+
+@app.route("/api/admin/users/<int:user_id>/password-reset", methods=["POST"])
+def api_admin_reset_user_password(user_id):
+    data = request.get_json(silent=True) or {}
+    new_password = data.get("password") or ""
+    if len(new_password) < 4:
+        return jsonify({"error": "password_too_short"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "user_not_found"}), 404
+
+    cur.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        (generate_password_hash(new_password), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+    log_audit_event("USER_PASSWORD_RESET", "users", user_id, {"email": row[1]})
+    return jsonify({"status": "ok", "user_id": user_id})
+
+
+@app.route("/api/admin/sites", methods=["GET"])
+def api_admin_get_sites():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, topic_name, description, created_at, updated_at FROM sites ORDER BY name")
+    sites = [row_to_site(r) for r in cur.fetchall()]
+    conn.close()
+    return jsonify(sites)
+
+
+@app.route("/api/admin/sites", methods=["POST"])
+def api_admin_create_site():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    description = (data.get("description") or "").strip()
+    topic_name = normalize_topic_part(data.get("topic_name") or name, "site")
+    if not name:
+        return jsonify({"error": "site_name_required"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    timestamp = now_iso()
+    try:
+        cur.execute("""
+            INSERT INTO sites (name, topic_name, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, topic_name, description, timestamp, timestamp))
+        site_id = cur.lastrowid
+        default_group_topic = "default_group"
+        cur.execute("""
+            INSERT INTO user_groups
+            (site_id, name, topic_name, topic_path, description, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        """, (
+            site_id,
+            "Default Group",
+            default_group_topic,
+            f"{topic_name}/{default_group_topic}",
+            "Default group created with site",
+            timestamp,
+            timestamp,
+        ))
+        group_id = cur.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "site_or_topic_already_exists"}), 400
+    conn.close()
+
+    log_audit_event("SITE_CREATED", "sites", site_id, {"name": name, "topic_name": topic_name, "default_group_id": group_id})
+    return jsonify({"status": "ok", "site_id": site_id, "default_group_id": group_id, "topic_name": topic_name})
+
+
+@app.route("/api/admin/groups", methods=["GET"])
+def api_admin_get_groups():
+    site_id = request.args.get("site_id", type=int)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    sql = """
+        SELECT g.id, g.site_id, s.name, s.topic_name, g.name, g.topic_name, g.topic_path,
+               g.description, g.is_default, g.created_at, g.updated_at
+        FROM user_groups g
+        JOIN sites s ON s.id = g.site_id
+    """
+    params = []
+    if site_id:
+        sql += " WHERE g.site_id = ?"
+        params.append(site_id)
+    sql += " ORDER BY s.name, g.is_default DESC, g.name"
+    cur.execute(sql, params)
+    groups = [row_to_group(r) for r in cur.fetchall()]
+    conn.close()
+    return jsonify(groups)
+
+
+@app.route("/api/admin/groups", methods=["POST"])
+def api_admin_create_group():
+    data = request.get_json(silent=True) or {}
+    site_id = data.get("site_id")
+    name = (data.get("name") or "").strip()
+    description = (data.get("description") or "").strip()
+    if not site_id or not name:
+        return jsonify({"error": "site_id_and_group_name_required"}), 400
+    try:
+        site_id = int(site_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_site_id"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, topic_name FROM sites WHERE id = ?", (site_id,))
+    site = cur.fetchone()
+    if not site:
+        conn.close()
+        return jsonify({"error": "site_not_found"}), 404
+
+    topic_name = normalize_topic_part(data.get("topic_name") or name, "group")
+    topic_path = f"{site[1]}/{topic_name}"
+    timestamp = now_iso()
+    try:
+        cur.execute("""
+            INSERT INTO user_groups
+            (site_id, name, topic_name, topic_path, description, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+        """, (site_id, name, topic_name, topic_path, description, timestamp, timestamp))
+        group_id = cur.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "group_or_topic_already_exists"}), 400
+    conn.close()
+
+    log_audit_event("GROUP_CREATED", "user_groups", group_id, {"site_id": site_id, "name": name, "topic_path": topic_path})
+    return jsonify({"status": "ok", "group_id": group_id, "topic_path": topic_path})
+
+
+@app.route("/api/admin/site-tree")
+def api_admin_site_tree():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, topic_name, description, created_at, updated_at FROM sites ORDER BY name")
+    sites = [row_to_site(r) for r in cur.fetchall()]
+    for site in sites:
+        cur.execute("""
+            SELECT g.id, g.site_id, s.name, s.topic_name, g.name, g.topic_name, g.topic_path,
+                   g.description, g.is_default, g.created_at, g.updated_at
+            FROM user_groups g
+            JOIN sites s ON s.id = g.site_id
+            WHERE g.site_id = ?
+            ORDER BY g.is_default DESC, g.name
+        """, (site["id"],))
+        groups = [row_to_group(r) for r in cur.fetchall()]
+        for group in groups:
+            cur.execute("""
+                SELECT id, name, email, role, status, user_topic_name, user_topic_path
+                FROM users
+                WHERE group_id = ?
+                ORDER BY name, email
+            """, (group["id"],))
+            group["users"] = [
+                {
+                    "id": r[0],
+                    "name": r[1],
+                    "email": r[2],
+                    "role": r[3],
+                    "status": r[4],
+                    "user_topic_name": r[5],
+                    "user_topic_path": r[6],
+                }
+                for r in cur.fetchall()
+            ]
+        site["groups"] = groups
+    conn.close()
+    return jsonify(sites)
+
+
+@app.route("/api/admin/topic-consistency", methods=["GET"])
+def api_admin_topic_consistency():
+    return jsonify(topic_consistency_report(repair_missing=False))
+
+
+@app.route("/api/admin/topic-consistency/repair-missing", methods=["POST"])
+def api_admin_repair_missing_topics():
+    report = topic_consistency_report(repair_missing=True)
+    log_audit_event("TOPIC_CONSISTENCY_REPAIR", "topic_consistency", None, report.get("repaired"))
+    return jsonify(report)
 
 
 @app.route("/api/admin/users", methods=["POST"])
@@ -1846,23 +3304,46 @@ def api_admin_create_user():
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
     role = str(data.get("role", "USER")).upper()
-    status = str(data.get("status", "ACTIVE")).upper()
+    status = str(data.get("status", "PENDING")).upper()
     company = (data.get("company") or "").strip()
     phone = (data.get("phone") or "").strip()
+    temporary = bool(data.get("temporary"))
 
     if not name or not email or not password:
         return jsonify({"error": "name_email_password_required"}), 400
     if role not in ("ADMIN", "USER"):
         return jsonify({"error": "invalid_role"}), 400
-    if status not in ("ACTIVE", "SUSPENDED"):
+    if status not in USER_STATUSES:
         return jsonify({"error": "invalid_status"}), 400
 
     conn = get_db_connection()
     cur = conn.cursor()
+    if temporary:
+        site_id, group_id, group_topic_path = get_default_site_group(cur)
+    else:
+        if not data.get("site_id") or not data.get("group_id"):
+            conn.close()
+            return jsonify({"error": "site_and_group_required"}), 400
+        try:
+            site_id = int(data.get("site_id"))
+            group_id = int(data.get("group_id"))
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify({"error": "invalid_site_or_group"}), 400
+        group_row = fetch_group_for_site(cur, site_id, group_id)
+        if not group_row:
+            conn.close()
+            return jsonify({"error": "group_not_found_for_site"}), 400
+        group_topic_path = group_row[1]
+
+    user_topic_name = normalize_topic_part(data.get("user_topic_name") or default_user_topic_name(name), "user")
+    user_topic_path = build_user_topic_path(group_topic_path, user_topic_name)
     try:
         cur.execute("""
-            INSERT INTO users (name, email, password_hash, company, phone, role, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users
+            (name, email, password_hash, company, phone, role, status, site_id, group_id,
+             user_topic_name, user_topic_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             name,
             email,
@@ -1871,6 +3352,10 @@ def api_admin_create_user():
             phone,
             role,
             status,
+            site_id,
+            group_id,
+            user_topic_name,
+            user_topic_path,
             now_iso(),
         ))
         user_id = cur.lastrowid
@@ -1880,8 +3365,23 @@ def api_admin_create_user():
         return jsonify({"error": "email_already_exists"}), 400
     conn.close()
 
-    log_audit_event("USER_CREATED", "users", user_id, {"email": email, "role": role, "status": status})
-    return jsonify({"status": "ok", "user_id": user_id})
+    log_audit_event("USER_CREATED", "users", user_id, {
+        "email": email,
+        "role": role,
+        "status": status,
+        "site_id": site_id,
+        "group_id": group_id,
+        "temporary": temporary,
+        "user_topic_path": user_topic_path,
+    })
+    return jsonify({
+        "status": "ok",
+        "user_id": user_id,
+        "site_id": site_id,
+        "group_id": group_id,
+        "user_topic_name": user_topic_name,
+        "user_topic_path": user_topic_path,
+    })
 
 
 @app.route("/device_management")
@@ -1894,9 +3394,12 @@ def api_admin_user_options():
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, name, email, role, status
-        FROM users
-        ORDER BY name, email
+        SELECT u.id, u.name, u.email, u.role, u.status,
+               u.site_id, s.name, u.group_id, g.name, u.user_topic_path
+        FROM users u
+        LEFT JOIN sites s ON s.id = u.site_id
+        LEFT JOIN user_groups g ON g.id = u.group_id
+        ORDER BY u.name, u.email
     """)
     rows = cur.fetchall()
     conn.close()
@@ -1907,6 +3410,11 @@ def api_admin_user_options():
             "email": r[2],
             "role": r[3],
             "status": r[4],
+            "site_id": r[5],
+            "site_name": r[6],
+            "group_id": r[7],
+            "group_name": r[8],
+            "user_topic_path": r[9],
         }
         for r in rows
     ])
@@ -1918,9 +3426,12 @@ def api_get_fleets():
     conn = get_db_connection()
     cur = conn.cursor()
     sql = """
-        SELECT f.id, f.name, f.description, f.owner_user_id, u.name, u.email, f.created_at, f.updated_at
+        SELECT f.id, f.name, f.description, f.owner_user_id, u.name, u.email,
+               f.topic_name, f.topic_path, f.created_at, f.updated_at,
+               fps.policy_json, fps.applied_at
         FROM fleets f
         LEFT JOIN users u ON u.id = f.owner_user_id
+        LEFT JOIN fleet_policy_state fps ON fps.fleet_id = f.id
     """
     params = []
     clauses = []
@@ -1951,16 +3462,22 @@ def api_create_fleet():
         owner_user_id = resolve_owner_user_id(data)
     except (TypeError, ValueError):
         return jsonify({"error": "invalid_owner_user_id"}), 400
-    if not fetch_user_exists(owner_user_id):
+    owner_context = fetch_user_topic_context(owner_user_id)
+    if not owner_context:
         return jsonify({"error": "owner_user_not_found"}), 404
+    if owner_context["status"] != "ACTIVE":
+        return jsonify({"error": "owner_user_not_active"}), 400
+    topic_name = normalize_topic_part(data.get("topic_name") or name, "fleet")
+    topic_path = build_fleet_topic_path(owner_context["user_topic_path"], topic_name)
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT INTO fleets (name, description, owner_user_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (name, description, owner_user_id, now_iso(), now_iso()))
+            INSERT INTO fleets
+            (name, description, owner_user_id, topic_name, topic_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (name, description, owner_user_id, topic_name, topic_path, now_iso(), now_iso()))
         fleet_id = cur.lastrowid
         conn.commit()
     except sqlite3.IntegrityError:
@@ -1968,8 +3485,8 @@ def api_create_fleet():
         return jsonify({"error": "fleet_name_already_exists_for_user"}), 400
     conn.close()
 
-    log_audit_event("FLEET_CREATED", "fleets", fleet_id, {"name": name, "owner_user_id": owner_user_id})
-    return jsonify({"status": "ok", "fleet_id": fleet_id})
+    log_audit_event("FLEET_CREATED", "fleets", fleet_id, {"name": name, "owner_user_id": owner_user_id, "topic_path": topic_path})
+    return jsonify({"status": "ok", "fleet_id": fleet_id, "topic_name": topic_name, "topic_path": topic_path})
 
 
 @app.route("/api/fleets/<int:fleet_id>", methods=["PUT"])
@@ -1994,25 +3511,55 @@ def api_update_fleet(fleet_id):
             return jsonify({"error": "invalid_owner_user_id"}), 400
         if not fetch_user_exists(owner_user_id):
             return jsonify({"error": "owner_user_not_found"}), 404
+    owner_context = fetch_user_topic_context(owner_user_id)
+    if not owner_context:
+        return jsonify({"error": "owner_user_not_found"}), 404
+    if owner_context["status"] != "ACTIVE":
+        return jsonify({"error": "owner_user_not_active"}), 400
+    old_topic_path = row[7]
+    topic_name = normalize_topic_part(data.get("topic_name") or name, "fleet")
+    topic_path = build_fleet_topic_path(owner_context["user_topic_path"], topic_name)
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             UPDATE fleets
-            SET name = ?, description = ?, owner_user_id = ?, updated_at = ?
+            SET name = ?, description = ?, owner_user_id = ?, topic_name = ?, topic_path = ?, updated_at = ?
             WHERE id = ?
-        """, (name, description, owner_user_id, now_iso(), fleet_id))
+        """, (name, description, owner_user_id, topic_name, topic_path, now_iso(), fleet_id))
         if owner_user_id != current_owner:
             cur.execute("UPDATE devices SET owner_user_id = ? WHERE fleet_id = ?", (owner_user_id, fleet_id))
+        cur.execute("""
+            SELECT id, device_id, device_type, topic_prefix, telemetry_topic, policy_topic
+            FROM devices
+            WHERE fleet_id = ?
+        """, (fleet_id,))
+        for device_row_id, device_id, device_type, current_prefix, current_telemetry, current_policy in cur.fetchall():
+            old_telemetry = build_device_telemetry_topic(old_topic_path or "", device_type, device_id) if old_topic_path else None
+            old_policy = build_device_policy_topic(old_topic_path or "", device_id) if old_topic_path else None
+            should_rebase = (
+                not current_prefix
+                or current_prefix == old_topic_path
+                or (old_telemetry and current_telemetry == old_telemetry)
+                or (old_policy and current_policy == old_policy)
+            )
+            if should_rebase:
+                next_telemetry = build_device_telemetry_topic(topic_path, device_type, device_id)
+                next_policy = build_device_policy_topic(topic_path, device_id)
+                cur.execute("""
+                    UPDATE devices
+                    SET topic_prefix = ?, telemetry_topic = ?, policy_topic = ?, updated_at = ?
+                    WHERE id = ?
+                """, (topic_path, next_telemetry, next_policy, now_iso(), device_row_id))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
         return jsonify({"error": "fleet_name_already_exists_for_user"}), 400
     conn.close()
 
-    log_audit_event("FLEET_UPDATED", "fleets", fleet_id, {"name": name, "owner_user_id": owner_user_id})
-    return jsonify({"status": "ok", "fleet_id": fleet_id})
+    log_audit_event("FLEET_UPDATED", "fleets", fleet_id, {"name": name, "owner_user_id": owner_user_id, "topic_path": topic_path})
+    return jsonify({"status": "ok", "fleet_id": fleet_id, "topic_name": topic_name, "topic_path": topic_path})
 
 
 @app.route("/api/fleets/<int:fleet_id>", methods=["DELETE"])
@@ -2030,6 +3577,8 @@ def api_delete_fleet(fleet_id):
     if device_count:
         conn.close()
         return jsonify({"error": "fleet_has_devices", "device_count": device_count}), 400
+    cur.execute("DELETE FROM fleet_policy_state WHERE fleet_id = ?", (fleet_id,))
+    cur.execute("DELETE FROM policy_deployment_log WHERE target_type = 'fleet' AND target_id = ?", (fleet_id,))
     cur.execute("DELETE FROM fleets WHERE id = ?", (fleet_id,))
     conn.commit()
     conn.close()
@@ -2045,12 +3594,14 @@ def api_get_devices():
     conn = get_db_connection()
     cur = conn.cursor()
     sql = """
-        SELECT d.id, d.device_id, d.device_name, d.device_type, d.fleet_id, f.name,
+        SELECT d.id, d.device_id, d.device_name, d.device_type, d.device_os, d.fleet_id, f.name,
                d.owner_user_id, u.name, u.email, d.status, d.topic_prefix,
-               d.telemetry_topic, d.policy_topic, d.description, d.created_at, d.updated_at
+               d.telemetry_topic, d.policy_topic, d.description, d.created_at, d.updated_at,
+               dps.policy_json, dps.applied_at
         FROM devices d
         LEFT JOIN fleets f ON f.id = d.fleet_id
         LEFT JOIN users u ON u.id = d.owner_user_id
+        LEFT JOIN device_policy_state dps ON dps.device_row_id = d.id
     """
     clauses = []
     params = []
@@ -2076,14 +3627,11 @@ def api_get_devices():
 @app.route("/api/devices", methods=["POST"])
 def api_create_device():
     data = request.get_json(silent=True) or {}
-    config = load_config()
     device_id = (data.get("device_id") or "").strip()
     device_name = (data.get("device_name") or "").strip()
     device_type = (data.get("device_type") or "raspberry_pi").strip()
+    device_os = normalize_device_os(data.get("device_os"))
     status = str(data.get("status") or "ACTIVE").upper()
-    topic_prefix = (data.get("topic_prefix") or config.get("mqtt", {}).get("topic_prefix") or "iot/sensor").strip()
-    telemetry_topic = (data.get("telemetry_topic") or "").strip()
-    policy_topic = (data.get("policy_topic") or "").strip()
     description = (data.get("description") or "").strip()
     fleet_id = data.get("fleet_id") or None
     if not device_id or not device_name:
@@ -2094,33 +3642,40 @@ def api_create_device():
         owner_user_id = resolve_owner_user_id(data)
     except (TypeError, ValueError):
         return jsonify({"error": "invalid_owner_user_id"}), 400
-    if not fetch_user_exists(owner_user_id):
+    owner_context = fetch_user_topic_context(owner_user_id)
+    if not owner_context:
         return jsonify({"error": "owner_user_not_found"}), 404
+    if owner_context["status"] != "ACTIVE":
+        return jsonify({"error": "owner_user_not_active"}), 400
+    fleet_context = None
     if fleet_id:
         try:
             fleet_id = int(fleet_id)
         except (TypeError, ValueError):
             return jsonify({"error": "invalid_fleet_id"}), 400
-        fleet = fetch_fleet_row(fleet_id)
-        if not fleet:
+        fleet_context = fetch_fleet_topic_context(fleet_id)
+        if not fleet_context:
             return jsonify({"error": "fleet_not_found"}), 404
-        if int(fleet[3]) != int(owner_user_id):
+        if int(fleet_context["owner_user_id"]) != int(owner_user_id):
             return jsonify({"error": "fleet_owner_mismatch"}), 400
-    if not telemetry_topic:
-        telemetry_topic = f"{topic_prefix}/{device_type}/{device_id}"
-    if not policy_topic:
-        policy_topic = f"{POLICY_TOPIC_PREFIX}{device_id}"
+    try:
+        resolved_topics = resolve_device_topics(owner_user_id, fleet_id, device_type, device_id, data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not resolved_topics:
+        return jsonify({"error": "device_topic_context_unavailable"}), 400
+    topic_prefix, telemetry_topic, policy_topic = resolved_topics
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             INSERT INTO devices
-            (device_id, device_name, device_type, fleet_id, owner_user_id, status,
+            (device_id, device_name, device_type, device_os, fleet_id, owner_user_id, status,
              topic_prefix, telemetry_topic, policy_topic, description, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            device_id, device_name, device_type, fleet_id, owner_user_id, status,
+            device_id, device_name, device_type, device_os, fleet_id, owner_user_id, status,
             topic_prefix, telemetry_topic, policy_topic, description, now_iso(), now_iso()
         ))
         row_id = cur.lastrowid
@@ -2130,7 +3685,7 @@ def api_create_device():
         return jsonify({"error": "device_id_already_exists"}), 400
     conn.close()
 
-    log_audit_event("DEVICE_CREATED", "devices", row_id, {"device_id": device_id, "owner_user_id": owner_user_id, "fleet_id": fleet_id})
+    log_audit_event("DEVICE_CREATED", "devices", row_id, {"device_id": device_id, "device_os": device_os, "owner_user_id": owner_user_id, "fleet_id": fleet_id, "telemetry_topic": telemetry_topic})
     return jsonify({"status": "ok", "id": row_id})
 
 
@@ -2150,10 +3705,8 @@ def api_update_device(row_id):
     device_id = (data.get("device_id") or "").strip()
     device_name = (data.get("device_name") or "").strip()
     device_type = (data.get("device_type") or "raspberry_pi").strip()
+    device_os = normalize_device_os(data.get("device_os"))
     status = str(data.get("status") or "ACTIVE").upper()
-    topic_prefix = (data.get("topic_prefix") or "iot/sensor").strip()
-    telemetry_topic = (data.get("telemetry_topic") or "").strip()
-    policy_topic = (data.get("policy_topic") or "").strip()
     description = (data.get("description") or "").strip()
     fleet_id = data.get("fleet_id") or None
     owner_user_id = existing[1]
@@ -2166,34 +3719,41 @@ def api_update_device(row_id):
         return jsonify({"error": "device_id_and_name_required"}), 400
     if status not in ("ACTIVE", "INACTIVE", "MAINTENANCE"):
         return jsonify({"error": "invalid_status"}), 400
-    if not fetch_user_exists(owner_user_id):
+    owner_context = fetch_user_topic_context(owner_user_id)
+    if not owner_context:
         return jsonify({"error": "owner_user_not_found"}), 404
+    if owner_context["status"] != "ACTIVE":
+        return jsonify({"error": "owner_user_not_active"}), 400
+    fleet_context = None
     if fleet_id:
         try:
             fleet_id = int(fleet_id)
         except (TypeError, ValueError):
             return jsonify({"error": "invalid_fleet_id"}), 400
-        fleet = fetch_fleet_row(fleet_id)
-        if not fleet:
+        fleet_context = fetch_fleet_topic_context(fleet_id)
+        if not fleet_context:
             return jsonify({"error": "fleet_not_found"}), 404
-        if int(fleet[3]) != int(owner_user_id):
+        if int(fleet_context["owner_user_id"]) != int(owner_user_id):
             return jsonify({"error": "fleet_owner_mismatch"}), 400
-    if not telemetry_topic:
-        telemetry_topic = f"{topic_prefix}/{device_type}/{device_id}"
-    if not policy_topic:
-        policy_topic = f"{POLICY_TOPIC_PREFIX}{device_id}"
+    try:
+        resolved_topics = resolve_device_topics(owner_user_id, fleet_id, device_type, device_id, data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not resolved_topics:
+        return jsonify({"error": "device_topic_context_unavailable"}), 400
+    topic_prefix, telemetry_topic, policy_topic = resolved_topics
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             UPDATE devices
-            SET device_id = ?, device_name = ?, device_type = ?, fleet_id = ?, owner_user_id = ?,
+            SET device_id = ?, device_name = ?, device_type = ?, device_os = ?, fleet_id = ?, owner_user_id = ?,
                 status = ?, topic_prefix = ?, telemetry_topic = ?, policy_topic = ?,
                 description = ?, updated_at = ?
             WHERE id = ?
         """, (
-            device_id, device_name, device_type, fleet_id, owner_user_id, status,
+            device_id, device_name, device_type, device_os, fleet_id, owner_user_id, status,
             topic_prefix, telemetry_topic, policy_topic, description, now_iso(), row_id
         ))
         conn.commit()
@@ -2202,7 +3762,7 @@ def api_update_device(row_id):
         return jsonify({"error": "device_id_already_exists"}), 400
     conn.close()
 
-    log_audit_event("DEVICE_UPDATED", "devices", row_id, {"device_id": device_id, "owner_user_id": owner_user_id, "fleet_id": fleet_id})
+    log_audit_event("DEVICE_UPDATED", "devices", row_id, {"device_id": device_id, "device_os": device_os, "owner_user_id": owner_user_id, "fleet_id": fleet_id, "telemetry_topic": telemetry_topic})
     return jsonify({"status": "ok", "id": row_id})
 
 
@@ -2218,12 +3778,443 @@ def api_delete_device(row_id):
     if not can_manage_owner(existing[2]):
         conn.close()
         return jsonify({"error": "forbidden"}), 403
+    cur.execute("DELETE FROM device_policy_state WHERE device_row_id = ?", (row_id,))
+    cur.execute("DELETE FROM policy_deployment_log WHERE device_row_id = ?", (row_id,))
+    cur.execute("DELETE FROM policy_deployment_log WHERE target_type = 'device' AND target_id = ?", (row_id,))
     cur.execute("DELETE FROM devices WHERE id = ?", (row_id,))
     conn.commit()
     conn.close()
 
     log_audit_event("DEVICE_DELETED", "devices", row_id, {"device_id": existing[1]})
     return jsonify({"status": "ok", "id": row_id})
+
+
+COMMON_CLIENT_PACKAGE_FILES = (
+    "raspi_iot_publisher.py",
+    "raspi-requirements.txt",
+)
+
+OS_CLIENT_PACKAGE_FILES = {
+    "raspberry_pi": (
+        "raspi_system_metrics_publisher.py",
+        "run_raspi_client.sh",
+        "run_raspi_system_metrics.sh",
+        "apr-raspi-client.service",
+        "README_RASPI_EDGE.md",
+    ),
+    "ubuntu_linux": (
+        "pc_test_publisher.py",
+        "run_pc_test_publisher.sh",
+        "README_RASPI_EDGE.md",
+    ),
+    "windows_pc": (
+        "pc_test_publisher.py",
+        "run_pc_test_publisher.bat",
+        "README_RASPI_EDGE.md",
+    ),
+}
+
+def fetch_device_client_context(row_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT d.id, d.device_id, d.device_name, d.device_type, d.device_os, d.fleet_id, f.name,
+               d.owner_user_id, u.name, u.email, d.status, d.topic_prefix,
+               d.telemetry_topic, d.policy_topic, d.description
+        FROM devices d
+        LEFT JOIN fleets f ON f.id = d.fleet_id
+        LEFT JOIN users u ON u.id = d.owner_user_id
+        WHERE d.id = ?
+    """, (row_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "device_id": row[1],
+        "device_name": row[2],
+        "device_type": row[3],
+        "device_os": normalize_device_os(row[4]),
+        "fleet_id": row[5],
+        "fleet_name": row[6],
+        "owner_user_id": row[7],
+        "owner_name": row[8],
+        "owner_email": row[9],
+        "status": row[10],
+        "topic_prefix": row[11],
+        "telemetry_topic": row[12],
+        "policy_topic": row[13],
+        "description": row[14],
+    }
+
+
+def mqtt_client_config_values():
+    config = load_config()
+    mqtt_config = config.get("mqtt", {})
+    broker = mqtt_config.get("broker")
+    port = mqtt_config.get("port", 1883)
+    if not broker and mqtt_config.get("brokers"):
+        first_broker = next((item for item in mqtt_config["brokers"] if item.get("enabled", True)), mqtt_config["brokers"][0])
+        broker = first_broker.get("host")
+        port = first_broker.get("port", port)
+    return {
+        "broker": broker or "127.0.0.1",
+        "port": int(port or 1883),
+        "username": mqtt_config.get("username", ""),
+        "password": mqtt_config.get("password", ""),
+        "tls": str(bool(mqtt_config.get("tls", False))).lower(),
+    }
+
+
+def render_client_config(device):
+    mqtt_values = mqtt_client_config_values()
+    sensor_type = normalize_topic_part(device.get("device_type"), "raspberry_pi")
+    return f"""[mqtt]
+broker = {mqtt_values["broker"]}
+port = {mqtt_values["port"]}
+username = {mqtt_values["username"]}
+password = {mqtt_values["password"]}
+tls = {mqtt_values["tls"]}
+
+[device]
+sensor_id = {device["device_id"]}
+sensor_type = {sensor_type}
+unit =
+client_id = apr-{device["device_id"]}
+
+[topics]
+telemetry = {device["telemetry_topic"]}
+policy = {device["policy_topic"]}
+
+[runtime]
+interval = 1.0
+experiment_id = RASPI_RUNTIME
+
+[security]
+apr_aes_key_hex = 01010101010101010101010101010101
+"""
+
+
+def render_system_metrics_config(device):
+    mqtt_values = mqtt_client_config_values()
+    return f"""[mqtt]
+broker = {mqtt_values["broker"]}
+port = {mqtt_values["port"]}
+username = {mqtt_values["username"]}
+password = {mqtt_values["password"]}
+tls = {mqtt_values["tls"]}
+
+[device]
+device_id = {device["device_id"]}
+device_name = {device["device_name"]}
+location = {device.get("fleet_name") or ""}
+client_id = apr-system-{device["device_id"]}
+
+[topics]
+topic_prefix = {device["topic_prefix"]}
+telemetry = {device["telemetry_topic"]}
+policy = {device["policy_topic"]}
+
+[runtime]
+enabled = true
+interval = 5.0
+experiment_id = RASPI_SYSTEM_RUNTIME
+metrics = cpu_percent,memory_percent,cpu_temp_c,disk_percent,load_1m
+
+[security]
+apr_aes_key_hex = 01010101010101010101010101010101
+"""
+
+
+@app.route("/api/devices/<int:row_id>/client-package", methods=["GET"])
+def api_download_device_client_package(row_id):
+    device = fetch_device_client_context(row_id)
+    if not device:
+        return jsonify({"error": "device_not_found"}), 404
+    if not can_manage_owner(device["owner_user_id"]):
+        return jsonify({"error": "forbidden"}), 403
+
+    memory = io.BytesIO()
+    device_dir = os.path.join(app.root_path, "device")
+    device_os = normalize_device_os(request.args.get("device_os") or device.get("device_os"))
+    topic_override_requested = any(request.args.get(key) for key in ("topic_prefix", "telemetry_topic", "policy_topic"))
+    if topic_override_requested:
+        try:
+            requested_topics = resolve_device_topics(
+                device["owner_user_id"],
+                device["fleet_id"],
+                device["device_type"],
+                device["device_id"],
+                request.args,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if requested_topics:
+            device["topic_prefix"], device["telemetry_topic"], device["policy_topic"] = requested_topics
+    package_files = list(COMMON_CLIENT_PACKAGE_FILES) + list(OS_CLIENT_PACKAGE_FILES.get(device_os, OS_CLIENT_PACKAGE_FILES["raspberry_pi"]))
+    with zipfile.ZipFile(memory, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("client.config", render_client_config(device))
+        if device_os == "raspberry_pi":
+            archive.writestr("system_metrics.config", render_system_metrics_config(device))
+        for filename in package_files:
+            file_path = os.path.join(device_dir, filename)
+            if os.path.exists(file_path):
+                archive.write(file_path, filename)
+        archive.writestr(
+            "START_HERE.txt",
+            "\n".join([
+                "APR dynamic client package",
+                "",
+                f"Device OS: {device_os}",
+                f"Telemetry topic: {device['telemetry_topic']}",
+                f"Policy topic: {device['policy_topic']}",
+                "",
+                "Raspberry Pi: ./run_raspi_client.sh",
+                "Raspberry Pi system metrics: ./run_raspi_system_metrics.sh",
+                "Ubuntu/Linux PC test: ./run_pc_test_publisher.sh",
+                "Windows PC test: run_pc_test_publisher.bat",
+                "",
+                "The downloaded config is generated from the Device Management screen.",
+                "If you change OS or topics on the screen, save the device and download again.",
+            ])
+        )
+    memory.seek(0)
+    download_name = f"apr_client_{normalize_topic_part(device['device_id'], 'device')}_{device_os}.zip"
+    log_audit_event("DEVICE_CLIENT_PACKAGE_DOWNLOADED", "devices", row_id, {
+        "device_id": device["device_id"],
+        "device_os": device_os,
+        "telemetry_topic": device["telemetry_topic"],
+        "policy_topic": device["policy_topic"],
+    })
+    return send_file(memory, mimetype="application/zip", as_attachment=True, download_name=download_name)
+
+
+def get_policy_deployment_logs(target_type, target_id, limit=20):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, target_type, target_id, device_row_id, device_id, policy_json, source,
+               published_topic, publish_status, last_error, actor_user_id, created_at
+        FROM policy_deployment_log
+        WHERE target_type = ? AND target_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (target_type, target_id, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return [
+        {
+            "id": r[0],
+            "target_type": r[1],
+            "target_id": r[2],
+            "device_row_id": r[3],
+            "device_id": r[4],
+            "policy": safe_json_loads(r[5]),
+            "source": r[6],
+            "published_topic": r[7],
+            "publish_status": r[8],
+            "last_error": r[9],
+            "actor_user_id": r[10],
+            "created_at": r[11],
+        }
+        for r in rows
+    ]
+
+
+def get_device_policy_state(row_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT policy_json, source, applied_by_user_id, applied_at,
+               published_topic, publish_status, last_error
+        FROM device_policy_state
+        WHERE device_row_id = ?
+    """, (row_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "policy": safe_json_loads(row[0]),
+        "source": row[1],
+        "applied_by_user_id": row[2],
+        "applied_at": row[3],
+        "published_topic": row[4],
+        "publish_status": row[5],
+        "last_error": row[6],
+    }
+
+
+def get_fleet_policy_state(fleet_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT policy_json, source, applied_by_user_id, applied_at,
+               publish_status, last_error
+        FROM fleet_policy_state
+        WHERE fleet_id = ?
+    """, (fleet_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "policy": safe_json_loads(row[0]),
+        "source": row[1],
+        "applied_by_user_id": row[2],
+        "applied_at": row[3],
+        "publish_status": row[4],
+        "last_error": row[5],
+    }
+
+
+def policy_from_request(data, topic):
+    mode = (data.get("mode") or "manual").strip().lower()
+    if mode == "recommend":
+        return recommend_policy_from_runtime(data, topic), "apr_recommend"
+    return validate_policy_payload(data.get("policy")), data.get("source") or "manual"
+
+
+@app.route("/api/devices/<int:row_id>/policy", methods=["GET"])
+def api_get_device_policy(row_id):
+    device = fetch_device_policy_target(row_id)
+    if not device:
+        return jsonify({"error": "device_not_found"}), 404
+    if not can_manage_owner(device["owner_user_id"]):
+        return jsonify({"error": "forbidden"}), 403
+    return jsonify({
+        "device": device,
+        "state": get_device_policy_state(row_id),
+        "logs": get_policy_deployment_logs("device", row_id),
+    })
+
+
+@app.route("/api/devices/<int:row_id>/policy/apply", methods=["POST"])
+def api_apply_device_policy(row_id):
+    device = fetch_device_policy_target(row_id)
+    if not device:
+        return jsonify({"error": "device_not_found"}), 404
+    if not can_manage_owner(device["owner_user_id"]):
+        return jsonify({"error": "forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        policy, source = policy_from_request(data, device.get("telemetry_topic") or device.get("device_id"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 501
+
+    result = apply_policy_to_device_target(device, policy, source=source)
+    log_audit_event("DEVICE_POLICY_APPLIED", "devices", row_id, {
+        "device_id": device["device_id"],
+        "policy": result["policy"],
+        "publish_status": result["publish_status"],
+    })
+    return jsonify({"status": "ok", "result": result, "state": get_device_policy_state(row_id)})
+
+
+@app.route("/api/fleets/<int:fleet_id>/policy", methods=["GET"])
+def api_get_fleet_policy(fleet_id):
+    fleet = fetch_fleet_row(fleet_id)
+    if not fleet:
+        return jsonify({"error": "fleet_not_found"}), 404
+    fleet_data = serialize_fleet(fleet)
+    if not can_manage_owner(fleet_data["owner_user_id"]):
+        return jsonify({"error": "forbidden"}), 403
+    return jsonify({
+        "fleet": fleet_data,
+        "state": get_fleet_policy_state(fleet_id),
+        "logs": get_policy_deployment_logs("fleet", fleet_id),
+    })
+
+
+@app.route("/api/fleets/<int:fleet_id>/policy/apply", methods=["POST"])
+def api_apply_fleet_policy(fleet_id):
+    fleet = fetch_fleet_row(fleet_id)
+    if not fleet:
+        return jsonify({"error": "fleet_not_found"}), 404
+    fleet_data = serialize_fleet(fleet)
+    if not can_manage_owner(fleet_data["owner_user_id"]):
+        return jsonify({"error": "forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    try:
+        policy, source = policy_from_request(data, fleet_data["name"])
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 501
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id
+        FROM devices
+        WHERE fleet_id = ? AND owner_user_id = ?
+        ORDER BY device_name
+    """, (fleet_id, fleet_data["owner_user_id"]))
+    device_ids = [r[0] for r in cur.fetchall()]
+    conn.close()
+
+    results = []
+    for device_row_id in device_ids:
+        device = fetch_device_policy_target(device_row_id)
+        if device:
+            results.append(apply_policy_to_device_target(device, policy, source=source))
+
+    failure_count = len([r for r in results if r["publish_status"] != "success"])
+    if not results:
+        publish_status = "no_devices"
+        last_error = "Fleet has no devices."
+    elif failure_count:
+        publish_status = "partial_failed"
+        last_error = f"{failure_count} of {len(results)} device policy publishes failed."
+    else:
+        publish_status = "success"
+        last_error = None
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO fleet_policy_state
+        (fleet_id, policy_json, source, applied_by_user_id, applied_at, publish_status, last_error)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fleet_id) DO UPDATE SET
+            policy_json = excluded.policy_json,
+            source = excluded.source,
+            applied_by_user_id = excluded.applied_by_user_id,
+            applied_at = excluded.applied_at,
+            publish_status = excluded.publish_status,
+            last_error = excluded.last_error
+    """, (
+        fleet_id,
+        json.dumps(policy, ensure_ascii=False),
+        source,
+        current_user_id(),
+        now_iso(),
+        publish_status,
+        last_error,
+    ))
+    log_policy_deployment(cur, "fleet", fleet_id, None, policy, source, None, publish_status, last_error)
+    conn.commit()
+    conn.close()
+
+    log_audit_event("FLEET_POLICY_APPLIED", "fleets", fleet_id, {
+        "fleet": fleet_data["name"],
+        "policy": policy,
+        "publish_status": publish_status,
+        "device_count": len(results),
+    })
+    return jsonify({
+        "status": "ok",
+        "fleet_id": fleet_id,
+        "policy": policy,
+        "publish_status": publish_status,
+        "last_error": last_error,
+        "device_results": results,
+        "state": get_fleet_policy_state(fleet_id),
+    })
 
 
 @app.route("/")
@@ -2261,6 +4252,8 @@ def api_broker_status():
     return jsonify({
         "brokers": brokers,
         "active_broker": active,
+        "connected": bool(apr_mqtt_client and apr_mqtt_client.is_connected()),
+        "startup_error": mqtt_startup_error,
         "distributed_enabled": len(brokers) > 1,
     })
 
@@ -2826,12 +4819,42 @@ def api_schema_stats():
     cur = conn.cursor()
     cur.execute("""
         SELECT schema_hash, payload_type, first_topic, last_topic, key_count,
-               message_count, total_bytes, first_seen, last_seen, sample_payload_text
+               message_count, total_bytes, first_seen, last_seen, sample_payload_text,
+               inferred_fields, semantic_summary, recommended_mapping, confidence_score,
+               storage_strategy
         FROM unknown_schema_profile
         ORDER BY message_count DESC, last_seen DESC
         LIMIT ?
     """, (limit,))
     rows = cur.fetchall()
+    schema_hashes = [r[0] for r in rows]
+    definitions = {}
+    if schema_hashes:
+        placeholders = ",".join(["?"] * len(schema_hashes))
+        cur.execute(f"""
+            SELECT schema_hash, display_name, target_type, status, field_mapping,
+                   storage_strategy, scope_type, scope_id, notes, created_by_user_id,
+                   approved_by_user_id, created_at, updated_at, approved_at
+            FROM usi_schema_definitions
+            WHERE schema_hash IN ({placeholders})
+        """, schema_hashes)
+        for d in cur.fetchall():
+            definitions[d[0]] = {
+                "schema_hash": d[0],
+                "display_name": d[1],
+                "target_type": d[2],
+                "status": d[3],
+                "field_mapping": safe_json_loads(d[4]) or {},
+                "storage_strategy": d[5],
+                "scope_type": d[6],
+                "scope_id": d[7],
+                "notes": d[8],
+                "created_by_user_id": d[9],
+                "approved_by_user_id": d[10],
+                "created_at": d[11],
+                "updated_at": d[12],
+                "approved_at": d[13],
+            }
     conn.close()
     return jsonify([
         {
@@ -2846,9 +4869,291 @@ def api_schema_stats():
             "first_seen": r[7],
             "last_seen": r[8],
             "sample_payload_text": r[9],
+            "inferred_fields": safe_json_loads(r[10]) or [],
+            "semantic_summary": safe_json_loads(r[11]) or {},
+            "recommended_mapping": safe_json_loads(r[12]) or {},
+            "confidence_score": r[13] or 0,
+            "storage_strategy": r[14],
+            "definition": definitions.get(r[0]),
         }
         for r in rows
     ])
+
+
+@app.route("/api/schema-inference/<schema_hash>")
+def api_schema_inference(schema_hash):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT schema_hash, payload_type, first_topic, last_topic, schema_keys,
+               inferred_fields, semantic_summary, recommended_mapping, confidence_score,
+               storage_strategy, sample_payload_text, message_count, total_bytes,
+               first_seen, last_seen
+        FROM unknown_schema_profile
+        WHERE schema_hash = ?
+    """, (schema_hash,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "schema_not_found"}), 404
+    cur.execute("""
+        SELECT schema_hash, display_name, target_type, status, field_mapping,
+               storage_strategy, scope_type, scope_id, notes, created_by_user_id,
+               approved_by_user_id, created_at, updated_at, approved_at
+        FROM usi_schema_definitions
+        WHERE schema_hash = ?
+    """, (schema_hash,))
+    definition_row = cur.fetchone()
+    conn.close()
+    definition = None
+    if definition_row:
+        definition = {
+            "schema_hash": definition_row[0],
+            "display_name": definition_row[1],
+            "target_type": definition_row[2],
+            "status": definition_row[3],
+            "field_mapping": safe_json_loads(definition_row[4]) or {},
+            "storage_strategy": definition_row[5],
+            "scope_type": definition_row[6],
+            "scope_id": definition_row[7],
+            "notes": definition_row[8],
+            "created_by_user_id": definition_row[9],
+            "approved_by_user_id": definition_row[10],
+            "created_at": definition_row[11],
+            "updated_at": definition_row[12],
+            "approved_at": definition_row[13],
+        }
+    return jsonify({
+        "schema_hash": row[0],
+        "payload_type": row[1],
+        "first_topic": row[2],
+        "last_topic": row[3],
+        "schema_keys": safe_json_loads(row[4]) or [],
+        "inferred_fields": safe_json_loads(row[5]) or [],
+        "semantic_summary": safe_json_loads(row[6]) or {},
+        "recommended_mapping": safe_json_loads(row[7]) or {},
+        "confidence_score": row[8] or 0,
+        "storage_strategy": row[9],
+        "sample_payload_text": row[10],
+        "message_count": row[11] or 0,
+        "total_bytes": row[12] or 0,
+        "first_seen": row[13],
+        "last_seen": row[14],
+        "definition": definition,
+    })
+
+
+@app.route("/api/usi/profiles/<schema_hash>/definition", methods=["GET"])
+def api_get_usi_definition(schema_hash):
+    definition = fetch_usi_definition(schema_hash)
+    if not definition:
+        return jsonify({"error": "definition_not_found"}), 404
+    return jsonify(definition)
+
+
+@app.route("/api/usi/profiles/<schema_hash>/definition", methods=["POST"])
+def api_save_usi_definition(schema_hash):
+    data = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT schema_hash FROM unknown_schema_profile WHERE schema_hash = ?", (schema_hash,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"error": "schema_not_found"}), 404
+    try:
+        payload = validate_usi_definition_payload(data, require_mapping=False)
+    except ValueError as exc:
+        conn.close()
+        return jsonify({"error": str(exc)}), 400
+    timestamp = now_iso()
+    cur.execute("""
+        INSERT INTO usi_schema_definitions
+        (schema_hash, display_name, target_type, status, field_mapping, storage_strategy,
+         scope_type, scope_id, notes, created_by_user_id, created_at, updated_at)
+        VALUES (?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(schema_hash) DO UPDATE SET
+            display_name = excluded.display_name,
+            target_type = excluded.target_type,
+            status = CASE
+                WHEN usi_schema_definitions.status = 'APPROVED' THEN 'DRAFT'
+                ELSE usi_schema_definitions.status
+            END,
+            field_mapping = excluded.field_mapping,
+            storage_strategy = excluded.storage_strategy,
+            scope_type = excluded.scope_type,
+            scope_id = excluded.scope_id,
+            notes = excluded.notes,
+            updated_at = excluded.updated_at
+    """, (
+        schema_hash,
+        payload["display_name"],
+        payload["target_type"],
+        json.dumps(payload["field_mapping"], ensure_ascii=False),
+        payload["storage_strategy"],
+        payload["scope_type"],
+        payload["scope_id"],
+        payload["notes"],
+        current_user_id(),
+        timestamp,
+        timestamp,
+    ))
+    log_usi_mapping_action(cur, schema_hash, "SAVE_DRAFT", payload)
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "definition": fetch_usi_definition(schema_hash)})
+
+
+@app.route("/api/usi/profiles/<schema_hash>/approve", methods=["POST"])
+def api_approve_usi_definition(schema_hash):
+    data = request.get_json(silent=True) or {}
+    definition = fetch_usi_definition(schema_hash)
+    if not definition:
+        return jsonify({"error": "definition_not_found"}), 404
+    try:
+        validate_usi_definition_payload(definition, require_mapping=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    timestamp = now_iso()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE usi_schema_definitions
+        SET status = 'APPROVED',
+            approved_by_user_id = ?,
+            approved_at = ?,
+            updated_at = ?,
+            notes = CASE WHEN ? != '' THEN ? ELSE notes END
+        WHERE schema_hash = ?
+    """, (
+        current_user_id(),
+        timestamp,
+        timestamp,
+        (data.get("notes") or "").strip(),
+        (data.get("notes") or "").strip(),
+        schema_hash,
+    ))
+    log_usi_mapping_action(cur, schema_hash, "APPROVE", {"notes": (data.get("notes") or "").strip()})
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "definition": fetch_usi_definition(schema_hash)})
+
+
+@app.route("/api/usi/profiles/<schema_hash>/reject", methods=["POST"])
+def api_reject_usi_definition(schema_hash):
+    data = request.get_json(silent=True) or {}
+    if not fetch_usi_definition(schema_hash):
+        return jsonify({"error": "definition_not_found"}), 404
+    timestamp = now_iso()
+    notes = (data.get("notes") or "").strip()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE usi_schema_definitions
+        SET status = 'REJECTED',
+            notes = CASE WHEN ? != '' THEN ? ELSE notes END,
+            updated_at = ?
+        WHERE schema_hash = ?
+    """, (notes, notes, timestamp, schema_hash))
+    log_usi_mapping_action(cur, schema_hash, "REJECT", {"notes": notes})
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "definition": fetch_usi_definition(schema_hash)})
+
+
+@app.route("/api/admin/usi/rebuild-profiles", methods=["POST"])
+def api_admin_rebuild_usi_profiles():
+    data = request.get_json(silent=True) or {}
+    limit = int(data.get("limit") or 5000)
+    limit = max(1, min(limit, 20000))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        WITH schema_agg AS (
+            SELECT schema_hash,
+                   MAX(id) AS latest_id,
+                   COUNT(*) AS message_count,
+                   SUM(payload_size) AS total_bytes,
+                   MIN(received_at) AS first_seen,
+                   MAX(received_at) AS last_seen
+            FROM unknown_payload_data
+            WHERE schema_hash IS NOT NULL AND trim(schema_hash) != ''
+            GROUP BY schema_hash
+            ORDER BY latest_id DESC
+            LIMIT ?
+        )
+        SELECT u.topic, u.payload_type, u.payload_text, u.received_at,
+               u.experiment_id, u.seq, u.publish_timestamp, u.received_timestamp,
+               u.measured_latency, u.qos, u.compression, u.encryption, u.integrity,
+               u.schema_hash, a.message_count, a.total_bytes, a.first_seen, a.last_seen
+        FROM schema_agg a
+        JOIN unknown_payload_data u ON u.id = a.latest_id
+        ORDER BY a.latest_id DESC
+    """, (limit,))
+    rows = cur.fetchall()
+    cur.execute("""
+        SELECT topic, payload_type, payload_text, received_at, experiment_id, seq,
+               publish_timestamp, received_timestamp, measured_latency, qos,
+               compression, encryption, integrity, schema_hash,
+               1 AS message_count, payload_size AS total_bytes, received_at AS first_seen, received_at AS last_seen
+        FROM unknown_payload_data
+        WHERE schema_hash IS NULL OR trim(schema_hash) = ''
+        ORDER BY id DESC
+        LIMIT ?
+    """, (max(0, min(100, limit - len(rows))),))
+    rows.extend(cur.fetchall())
+    conn.close()
+
+    rebuilt = 0
+    failed = 0
+    for r in rows:
+        payload_text = r[2] or ""
+        payload_type = r[1] or "unknown"
+        parsed = None
+        if payload_type not in ("non_json", "decryption_failed"):
+            try:
+                parsed = json.loads(payload_text)
+            except Exception:
+                parsed = None
+        meta = {
+            "topic": r[0],
+            "experiment_id": r[4],
+            "seq": r[5],
+            "publish_timestamp": r[6],
+            "received_timestamp": r[7] or r[3] or now_iso(),
+            "measured_latency": r[8],
+            "qos": r[9],
+            "compression": r[10],
+            "encryption": r[11],
+            "integrity": r[12],
+            "schema_hash": r[13] or (calc_schema_hash(parsed) if isinstance(parsed, dict) else calc_payload_fingerprint(payload_text)),
+            "payload_size": len(payload_text.encode("utf-8")),
+        }
+        try:
+            upsert_unknown_schema_profile(meta, payload_type, payload_text, parsed)
+            conn = get_db_connection()
+            conn.execute("""
+                UPDATE unknown_schema_profile
+                SET message_count = ?,
+                    total_bytes = ?,
+                    first_seen = ?,
+                    last_seen = ?
+                WHERE schema_hash = ?
+            """, (
+                int(r[14] or 1),
+                int(r[15] or meta["payload_size"]),
+                r[16] or meta["received_timestamp"],
+                r[17] or meta["received_timestamp"],
+                meta["schema_hash"],
+            ))
+            conn.commit()
+            conn.close()
+            rebuilt += 1
+        except Exception as exc:
+            failed += 1
+            print(f"[USI] profile rebuild failed: {exc}")
+
+    log_audit_event("USI_PROFILE_REBUILD", "unknown_schema_profile", None, {"limit": limit, "rebuilt": rebuilt, "failed": failed})
+    return jsonify({"status": "ok", "limit": limit, "rebuilt": rebuilt, "failed": failed})
 
 
 @app.route("/api/schema-samples")
@@ -2959,66 +5264,261 @@ def api_chart(sensor_id):
     })
 
 
+def sensor_definition_from_row(row):
+    sensor = {
+        "id": row[1],
+        "type": row[2],
+        "unit": row[3] or "",
+        "topic": row[4],
+        "definition_source": row[5] or "SIMULATOR",
+        "source": row[5] or "SIMULATOR",
+        "owner_user_id": row[6],
+        "owner_name": row[7] or "",
+        "owner_email": row[8] or "",
+        "payload_schema_mode": row[9] or "defined_sensor",
+        "policy": row[10] or "none",
+        "min": row[11],
+        "max": row[12],
+        "start": row[13],
+        "step": row[14],
+        "interval": row[15],
+        "mode": row[16] or "",
+        "enabled": bool(row[18]),
+    }
+    color_rule = safe_json_loads(row[17])
+    if color_rule:
+        sensor["color_rule"] = color_rule
+    return sensor
+
+
+def fetch_sensor_definitions(enabled_only=False, definition_source=None):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    sql = """
+        SELECT sd.id, sd.sensor_id, sd.sensor_type, sd.unit, sd.topic,
+               sd.definition_source, sd.owner_user_id, u.name, u.email,
+               sd.payload_schema_mode, sd.policy, sd.min_value, sd.max_value,
+               sd.start_value, sd.step_value, sd.interval_seconds,
+               sd.simulation_mode, sd.color_rule_json, sd.enabled
+        FROM sensor_definitions sd
+        LEFT JOIN users u ON u.id = sd.owner_user_id
+    """
+    clauses = []
+    params = []
+    if enabled_only:
+        clauses.append("sd.enabled = ?")
+        params.append(1)
+    if definition_source:
+        clauses.append("UPPER(sd.definition_source) = ?")
+        params.append(str(definition_source).upper())
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY sd.definition_source, sd.sensor_id"
+    cur.execute(sql, params)
+    sensors = [sensor_definition_from_row(row) for row in cur.fetchall()]
+    conn.close()
+    return sensors
+
+
+def optional_float(value, field_name):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid_{field_name}") from exc
+
+
+def normalize_sensor_definition(data):
+    sensor_id = str(data.get("id") or "").strip()
+    sensor_type = str(data.get("type") or "").strip()
+    if not sensor_id or not sensor_type:
+        raise ValueError("sensor_id_and_type_required")
+
+    definition_source = str(data.get("definition_source") or data.get("source") or "USER").strip().upper()
+    if definition_source not in ("SIMULATOR", "USER"):
+        raise ValueError("invalid_sensor_definition_source")
+
+    owner_user_id = data.get("owner_user_id")
+    if definition_source == "USER":
+        if current_user_is_admin() and owner_user_id:
+            owner_user_id = int(owner_user_id)
+        else:
+            owner_user_id = current_user_id()
+        if not owner_user_id:
+            raise ValueError("owner_user_required")
+        owner_context = fetch_user_topic_context(owner_user_id)
+        if not owner_context:
+            raise ValueError("invalid_owner_user_id")
+        if owner_context["status"] != "ACTIVE":
+            raise ValueError("owner_user_not_active")
+    else:
+        owner_user_id = None
+
+    config = load_config()
+    topic = str(data.get("topic") or "").strip()
+    if not topic:
+        prefix = config.get("mqtt", {}).get("topic_prefix", "iot/sensor")
+        topic = f"{prefix}/{normalize_topic_part(sensor_type, 'sensor')}/{normalize_topic_part(sensor_id, 'sensor')}"
+    topic = clean_mqtt_publish_topic(topic)
+
+    color_rule = data.get("color_rule")
+    if color_rule is not None and not isinstance(color_rule, dict):
+        raise ValueError("invalid_color_rule")
+
+    return {
+        "id": sensor_id,
+        "type": sensor_type,
+        "unit": str(data.get("unit") or "").strip(),
+        "topic": topic,
+        "definition_source": definition_source,
+        "source": definition_source,
+        "owner_user_id": owner_user_id,
+        "payload_schema_mode": str(data.get("payload_schema_mode") or "defined_sensor").strip(),
+        "policy": str(data.get("policy") or "none").strip(),
+        "min": optional_float(data.get("min"), "min"),
+        "max": optional_float(data.get("max"), "max"),
+        "start": optional_float(data.get("start"), "start"),
+        "step": optional_float(data.get("step"), "step"),
+        "interval": optional_float(data.get("interval"), "interval"),
+        "mode": str(data.get("mode") or "").strip(),
+        "color_rule": color_rule,
+        "enabled": bool(data.get("enabled", True)),
+    }
+
+
+def sensor_definition_db_values(sensor):
+    timestamp = now_iso()
+    return (
+        sensor["id"],
+        sensor["type"],
+        sensor["unit"],
+        sensor["topic"],
+        sensor["definition_source"],
+        sensor["owner_user_id"],
+        sensor["payload_schema_mode"],
+        sensor["policy"],
+        sensor["min"],
+        sensor["max"],
+        sensor["start"],
+        sensor["step"],
+        sensor["interval"],
+        sensor["mode"],
+        json.dumps(sensor.get("color_rule"), ensure_ascii=False) if sensor.get("color_rule") else None,
+        1 if sensor.get("enabled", True) else 0,
+        timestamp,
+        timestamp,
+    )
+
+
 @app.route("/api/config", methods=["GET"])
 def api_get_config():
-    return jsonify(load_config())
+    config = load_config()
+    config["sensors"] = fetch_sensor_definitions()
+    return jsonify(config)
 
 
 @app.route("/api/sensors", methods=["GET"])
 def api_get_sensors():
-    config = load_config()
-    return jsonify(config.get("sensors", []))
+    source = request.args.get("source")
+    return jsonify(fetch_sensor_definitions(definition_source=source))
 
 
 @app.route("/api/sensors", methods=["POST"])
 def api_add_sensor():
-    data = request.json
-    config = load_config()
+    data = request.get_json(silent=True) or {}
+    try:
+        sensor = normalize_sensor_definition(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    sensors = config.get("sensors", [])
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO sensor_definitions
+            (sensor_id, sensor_type, unit, topic, definition_source, owner_user_id,
+             payload_schema_mode, policy,
+             min_value, max_value, start_value, step_value, interval_seconds,
+             simulation_mode, color_rule_json, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, sensor_definition_db_values(sensor))
+        row_id = cur.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError as exc:
+        conn.close()
+        error = "sensor_topic_already_exists" if "topic" in str(exc).lower() else "sensor_id_already_exists"
+        return jsonify({"error": error}), 400
+    conn.close()
 
-    for s in sensors:
-        if s["id"] == data["id"]:
-            return jsonify({"error": "sensor id already exists"}), 400
-
-    if not data.get("topic"):
-        topic_prefix = config["mqtt"]["topic_prefix"]
-        data["topic"] = f"{topic_prefix}/{data['id']}"
-
-    sensors.append(data)
-    config["sensors"] = sensors
-    save_config(config)
-
-    return jsonify({"message": "sensor added"})
+    log_audit_event("SENSOR_DEFINITION_CREATED", "sensor_definitions", row_id, {
+        "sensor_id": sensor["id"],
+        "topic": sensor["topic"],
+        "definition_source": sensor["definition_source"],
+        "owner_user_id": sensor["owner_user_id"],
+    })
+    return jsonify({"message": "sensor added", "id": row_id, "sensor": sensor})
 
 
 @app.route("/api/sensors/<sensor_id>", methods=["PUT"])
 def api_update_sensor(sensor_id):
-    data = request.json
-    config = load_config()
+    data = request.get_json(silent=True) or {}
+    data["id"] = sensor_id
+    try:
+        sensor = normalize_sensor_definition(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    sensors = config.get("sensors", [])
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM sensor_definitions WHERE sensor_id = ?", (sensor_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "sensor not found"}), 404
+    try:
+        values = sensor_definition_db_values(sensor)
+        cur.execute("""
+            UPDATE sensor_definitions
+            SET sensor_type = ?, unit = ?, topic = ?, definition_source = ?,
+                owner_user_id = ?, payload_schema_mode = ?, policy = ?,
+                min_value = ?, max_value = ?, start_value = ?, step_value = ?,
+                interval_seconds = ?, simulation_mode = ?, color_rule_json = ?,
+                enabled = ?, updated_at = ?
+            WHERE sensor_id = ?
+        """, values[1:16] + (values[17], sensor_id))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "sensor_topic_already_exists"}), 400
+    conn.close()
 
-    for i, s in enumerate(sensors):
-        if s["id"] == sensor_id:
-            sensors[i] = data
-            config["sensors"] = sensors
-            save_config(config)
-            return jsonify({"message": "sensor updated"})
-
-    return jsonify({"error": "sensor not found"}), 404
+    log_audit_event("SENSOR_DEFINITION_UPDATED", "sensor_definitions", row[0], {
+        "sensor_id": sensor_id,
+        "topic": sensor["topic"],
+        "definition_source": sensor["definition_source"],
+        "owner_user_id": sensor["owner_user_id"],
+    })
+    return jsonify({"message": "sensor updated", "sensor": sensor})
 
 
 @app.route("/api/sensors/<sensor_id>", methods=["DELETE"])
 def api_delete_sensor(sensor_id):
-    config = load_config()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, topic FROM sensor_definitions WHERE sensor_id = ?", (sensor_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "sensor not found"}), 404
+    cur.execute("DELETE FROM sensor_definitions WHERE sensor_id = ?", (sensor_id,))
+    conn.commit()
+    conn.close()
 
-    sensors = config.get("sensors", [])
-    sensors = [s for s in sensors if s["id"] != sensor_id]
-
-    config["sensors"] = sensors
-    save_config(config)
-
+    log_audit_event("SENSOR_DEFINITION_DELETED", "sensor_definitions", row[0], {
+        "sensor_id": sensor_id,
+        "topic": row[1],
+    })
     return jsonify({"message": "sensor deleted"})
 
 
@@ -3425,8 +5925,14 @@ def api_voice_results():
 
 
 if __name__ == "__main__":
+    app_port = DEFAULT_APP_PORT
+    assert_port_available(app_port)
+    db_health = check_db_file_health()
+    print(f"[startup] DB health: {db_health}")
     acquire_system_lock()
     init_db()
+    table_health = validate_required_tables()
+    print(f"[startup] DB schema: {table_health}")
     if db_manager:
         db_manager.db_name = DB_NAME
         db_writer_config = get_platform_runtime_config().get("db_writer", {})
@@ -3436,8 +5942,14 @@ if __name__ == "__main__":
             max_queue_size=db_writer_config.get("max_queue_size"),
         )
         db_manager.start()
-    mqtt_client = start_mqtt()
     try:
-        app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+        mqtt_client = start_mqtt()
+        mqtt_startup_error = None
+    except Exception as exc:
+        mqtt_client = None
+        mqtt_startup_error = str(exc)
+        print(f"[startup] MQTT unavailable; dashboard will continue without broker connection: {exc}")
+    try:
+        app.run(host="0.0.0.0", port=app_port, debug=False, use_reloader=False)
     finally:
         graceful_shutdown()

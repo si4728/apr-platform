@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     "location": "",
     "client_id": "",
     "topic_prefix": "iot/sensor/system",
+    "topic": "",
     "policy_topic": "",
     "interval": 5.0,
     "experiment_id": "RASPI_SYSTEM_RUNTIME",
@@ -120,6 +121,7 @@ def load_client_config(config_path):
         config["client_id"] = f"raspi-system-{config['device_id']}"
 
     config["topic_prefix"] = _get_config_value(parser, "topics", "topic_prefix", config["topic_prefix"])
+    config["topic"] = _get_config_value(parser, "topics", "telemetry", config["topic"])
     config["policy_topic"] = _get_config_value(parser, "topics", "policy", config["policy_topic"])
     if not config["policy_topic"]:
         config["policy_topic"] = f"iot/sensor/policy/{config['device_id']}_system"
@@ -299,7 +301,7 @@ def collect_system_metrics(prev_stat):
 
 def build_system_payload(args, metrics, seq_num):
     base_sensor_id = f"{args.device_id}_system"
-    topic = f"{args.topic_prefix}/{base_sensor_id}"
+    topic = args.topic or f"{args.topic_prefix}/{base_sensor_id}"
     metric_units = {
         name: METRIC_DEFS[name][1]
         for name in metrics
@@ -443,7 +445,7 @@ def main():
     client.loop_start()
 
     print(f"[system] device: {args.device_id} ({args.device_name})")
-    print(f"[system] topic prefix: {args.topic_prefix}/{args.device_id}_system")
+    print(f"[system] telemetry topic: {args.topic or f'{args.topic_prefix}/{args.device_id}_system'}")
     print(f"[system] policy topic: {args.policy_topic}, {args.policy_topic}/system")
     print(f"[system] initial options: {runtime_options}")
     print(f"[system] initial policy: {active_policy}")

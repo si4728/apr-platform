@@ -8,6 +8,7 @@ import paho.mqtt.client as mqtt
 from publisher.async_publisher import AsyncPublisher
 from network_emulation import normalize_network_profile
 from distributed_broker import connect_client_to_any_broker
+from sensor_registry import DB_NAME, load_sensor_definitions
 
 CONFIG_FILE = "config.json"
 
@@ -356,7 +357,7 @@ def stop_all_sensors():
 def start_sensors(config, mqtt_client, publisher):
     platform_config = get_platform_config(config)
 
-    for sensor in config.get("sensors", []):
+    for sensor in load_sensor_definitions(enabled_only=True, definition_source="SIMULATOR"):
         sid = sensor["id"]
         stop_flags[sid] = False
         
@@ -394,14 +395,17 @@ def main():
     )
     async_publisher.start()
 
-    last_modified = 0
+    last_modified = None
 
     try:
         while True:
-            current_modified = os.path.getmtime(CONFIG_FILE)
+            current_modified = (
+                os.path.getmtime(CONFIG_FILE),
+                os.path.getmtime(DB_NAME) if os.path.exists(DB_NAME) else 0,
+            )
 
             if current_modified != last_modified:
-                print("\n[CONFIG CHANGED] reload config.json")
+                print("\n[CONFIG OR SENSOR TABLE CHANGED] reload runtime configuration")
 
                 stop_all_sensors()
 

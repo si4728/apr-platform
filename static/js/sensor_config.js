@@ -10,6 +10,7 @@ let sensorTypes = [
 ];
 
 let topicPrefix = "iot/sensor";
+let ownerUsers = [];
 
 
 /* -----------------------------
@@ -139,6 +140,62 @@ function emptyToDash(value) {
     }
 
     return value;
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function sourceLabel(value) {
+    const source = String(value || "SIMULATOR").toUpperCase();
+    return source === "USER" ? "USER / real" : "SIMULATOR";
+}
+
+function ownerLabel(sensor) {
+    if ((sensor.definition_source || sensor.source || "SIMULATOR").toUpperCase() !== "USER") {
+        return "-";
+    }
+    return sensor.owner_name || sensor.owner_email || sensor.owner_user_id || "-";
+}
+
+async function loadOwnerUsers() {
+    const select = getElement("sensorOwnerUser");
+    if (!select) return;
+
+    try {
+        const res = await fetch("/api/admin/users/options");
+        if (!res.ok) {
+            throw new Error("owner load failed");
+        }
+        ownerUsers = (await res.json()).filter(user => user.status === "ACTIVE");
+    } catch (err) {
+        console.warn("loadOwnerUsers error:", err);
+        ownerUsers = [];
+    }
+
+    select.innerHTML = `<option value="">owner user</option>`;
+    ownerUsers.forEach(user => {
+        const label = `${user.name || user.email} (${user.email})`;
+        select.innerHTML += `<option value="${escapeHtml(user.id)}">${escapeHtml(label)}</option>`;
+    });
+}
+
+function updateOwnerControl() {
+    const source = getValue("sensorSource") || "USER";
+    const owner = getElement("sensorOwnerUser");
+    if (!owner) return;
+
+    if (source.toUpperCase() === "SIMULATOR") {
+        owner.value = "";
+        owner.disabled = true;
+    } else {
+        owner.disabled = false;
+    }
 }
 
 
@@ -304,6 +361,8 @@ function buildSensorObject() {
         type: sensorType,
         unit: getValue("sensorUnit"),
         topic: getValue("sensorTopic"),
+        definition_source: (getValue("sensorSource") || "USER").toUpperCase(),
+        owner_user_id: getValue("sensorSource").toUpperCase() === "SIMULATOR" ? null : getNumberValue("sensorOwnerUser"),
         payload_schema_mode: getPayloadSchemaMode(),
         policy: getValue("sensorPolicy") || "none",
         min: getNumberValue("sensorMin"),
@@ -343,7 +402,13 @@ async function loadSensorConfig() {
         const table = getElement("sensorConfigTable");
         table.innerHTML = "";
 
-        config.sensors.forEach(sensor => {
+        const selectedSourceFilter = (getValue("sensorSourceFilter") || "").toUpperCase();
+        const filteredSensors = config.sensors.filter(sensor => {
+            if (!selectedSourceFilter) return true;
+            return String(sensor.definition_source || sensor.source || "SIMULATOR").toUpperCase() === selectedSourceFilter;
+        });
+
+        filteredSensors.forEach(sensor => {
             if (!sensorTypes.includes(sensor.type)) {
                 sensorTypes.push(sensor.type);
             }
@@ -367,11 +432,13 @@ async function loadSensorConfig() {
 
             table.innerHTML += `
                 <tr onclick='selectSensor(${safeSensorJson})'>
-                    <td>${emptyToDash(sensor.id)}</td>
-                    <td>${emptyToDash(sensor.type)}</td>
-                    <td>${emptyToDash(sensor.unit)}</td>
-                    <td>${emptyToDash(sensor.topic)}</td>
-                    <td>${emptyToDash(sensor.payload_schema_mode || "defined_sensor")}</td>
+                    <td>${escapeHtml(emptyToDash(sensor.id))}</td>
+                    <td>${escapeHtml(emptyToDash(sensor.type))}</td>
+                    <td>${escapeHtml(emptyToDash(sensor.unit))}</td>
+                    <td>${escapeHtml(emptyToDash(sensor.topic))}</td>
+                    <td>${escapeHtml(sourceLabel(sensor.definition_source || sensor.source))}</td>
+                    <td>${escapeHtml(ownerLabel(sensor))}</td>
+                    <td>${escapeHtml(emptyToDash(sensor.payload_schema_mode || "defined_sensor"))}</td>
                     <td style="font-weight:bold; color:${sensor.policy === 'apr' ? '#0369a1' : '#6b7280'};">${emptyToDash(sensor.policy || "none")}</td>
                     <td>${emptyToDash(sensor.min)} ~ ${emptyToDash(sensor.max)}</td>
                     <td>${lowText}</td>
@@ -402,6 +469,9 @@ function selectSensor(sensor) {
     setValue("sensorType", sensor.type);
     setValue("sensorUnit", sensor.unit);
     setValue("sensorTopic", sensor.topic);
+    setValue("sensorSource", sensor.definition_source || sensor.source || "SIMULATOR");
+    setValue("sensorOwnerUser", sensor.owner_user_id || "");
+    updateOwnerControl();
     setPayloadSchemaMode(sensor.payload_schema_mode || "defined_sensor");
     setValue("sensorPolicy", sensor.policy || "none");
     setValue("sensorMin", sensor.min);
@@ -528,6 +598,7 @@ function clearForm() {
         "sensorStart",
         "sensorStep",
         "sensorInterval",
+        "sensorOwnerUser",
         "sensorLowMax",
         "sensorNormalMin",
         "sensorNormalMax",
@@ -539,6 +610,8 @@ function clearForm() {
     }
 
     setValue("sensorMode", "random_walk");
+    setValue("sensorSource", "USER");
+    updateOwnerControl();
     setPayloadSchemaMode("defined_sensor");
     setValue("sensorPolicy", "none");
 
@@ -553,10 +626,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     ensurePayloadSchemaModeControl();
     ensurePayloadSchemaHeader();
 
+    await loadOwnerUsers();
     await loadSensorConfig();
 
     const sensorIdObj = getElement("sensorId");
     const sensorTypeObj = getElement("sensorType");
+    const sensorSourceObj = getElement("sensorSource");
+    const sensorSourceFilterObj = getElement("sensorSourceFilter");
 
     if (sensorIdObj) {
         sensorIdObj.addEventListener("input", updateTopicPreview);
@@ -566,5 +642,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         sensorTypeObj.addEventListener("change", updateTopicPreview);
     }
 
+    if (sensorSourceObj) {
+        sensorSourceObj.addEventListener("change", updateOwnerControl);
+    }
+
+    if (sensorSourceFilterObj) {
+        sensorSourceFilterObj.addEventListener("change", loadSensorConfig);
+    }
+
     updateTopicPreview();
+    updateOwnerControl();
 });

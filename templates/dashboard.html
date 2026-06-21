@@ -6,14 +6,14 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-    <link rel="stylesheet" href="/static/css/dashboard_common.css">
+    <link rel="stylesheet" href="/static/css/dashboard_common.css?v=6">
     <script src="/static/js/common_menu.js"></script>
 
     <script>
         const pageMode = "single";
     </script>
 
-    <script src="/static/js/dashboard_common.js?v=4" defer></script>
+    <script src="/static/js/dashboard_common.js?v=6" defer></script>
 </head>
 
 <body>
@@ -122,12 +122,26 @@
             <div>선택한 센서 1개의 실시간 데이터와 미정의 payload 통계를 함께 표시합니다.</div>
         </div>
 
+        <section id="dashboardDisplaySettings" class="dashboard-display-settings">
+            <div class="dashboard-display-settings-heading">
+                <h3>표시 설정</h3>
+            </div>
+            <div id="dashboardDisplaySettingsMount"></div>
+        </section>
+
         <div class="single-chart-panel">
             <div id="singleCollectionWarning" class="collection-warning-box collection-ok">
                 수집 지연 상태: -
             </div>
             <canvas id="sensorChart"></canvas>
         </div>
+
+        <section id="dashboardSensorList" class="dashboard-sensor-list">
+            <div class="dashboard-sensor-list-heading">
+                <h3>센서 목록</h3>
+            </div>
+            <div id="dashboardSensorListMount"></div>
+        </section>
 
         <section class="dashboard-section">
             <div class="section-title-row">

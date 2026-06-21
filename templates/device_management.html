@@ -25,7 +25,7 @@
             </div>
             <div class="info-item">
                 <span class="info-label">APR Topic</span><br>
-                Telemetry and policy topics are stored per device.
+                Default topics follow Site / Group / User / Fleet / Device.
             </div>
         </div>
     </aside>
@@ -51,6 +51,15 @@
             </div>
         </div>
 
+        <div class="config-panel admin-only" style="display:none;">
+            <h3>Topic Consistency</h3>
+            <div class="button-row">
+                <button type="button" onclick="auditTopics()">Audit Topics</button>
+                <button type="button" onclick="repairMissingTopics()">Repair Missing Defaults</button>
+            </div>
+            <div id="topicAuditStatus" class="policy-status-box">Topic audit not run.</div>
+        </div>
+
         <div class="config-panel">
             <h3>Fleet</h3>
             <div class="form-row admin-only" style="display:none;">
@@ -59,6 +68,7 @@
             <div class="form-row">
                 <input id="fleetId" type="hidden">
                 <input id="fleetName" placeholder="fleet name">
+                <input id="fleetTopicName" placeholder="fleet topic default: fleet name">
                 <input id="fleetDescription" placeholder="description">
             </div>
             <div class="button-row">
@@ -74,6 +84,8 @@
                     <tr>
                         <th>Fleet</th>
                         <th>Owner</th>
+                        <th>Topic</th>
+                        <th>Policy</th>
                         <th>Description</th>
                         <th>Created</th>
                     </tr>
@@ -92,6 +104,11 @@
                 <input id="deviceId" placeholder="device id">
                 <input id="deviceName" placeholder="device name">
                 <input id="deviceType" placeholder="device type" value="raspberry_pi">
+                <select id="deviceOs">
+                    <option value="raspberry_pi">Raspberry Pi</option>
+                    <option value="ubuntu_linux">Ubuntu/Linux</option>
+                    <option value="windows_pc">Windows PC</option>
+                </select>
                 <select id="deviceStatus">
                     <option value="ACTIVE">ACTIVE</option>
                     <option value="INACTIVE">INACTIVE</option>
@@ -100,9 +117,9 @@
             </div>
             <div class="form-row">
                 <select id="deviceFleet"></select>
-                <input id="topicPrefix" placeholder="topic prefix" value="iot/sensor">
-                <input id="telemetryTopic" placeholder="telemetry topic">
-                <input id="policyTopic" placeholder="policy topic">
+                <input id="topicPrefix" placeholder="topic prefix auto or custom">
+                <input id="telemetryTopic" placeholder="telemetry topic auto or custom">
+                <input id="policyTopic" placeholder="policy topic auto or custom">
             </div>
             <div class="form-row">
                 <input id="deviceDescription" placeholder="description">
@@ -110,8 +127,44 @@
             <div class="button-row">
                 <button type="button" onclick="saveDevice()">Save Device</button>
                 <button type="button" onclick="clearDeviceForm()">Clear</button>
+                <button type="button" onclick="generateDeviceTopics()">Generate Topics</button>
+                <button type="button" onclick="downloadClientPackage()">Download Client/Test Package</button>
                 <button type="button" class="danger-button" onclick="deleteDevice()">Delete Device</button>
             </div>
+            <div id="clientPackageStatus" class="policy-status-box">Select OS and topics, then save or download the matching client/test package.</div>
+        </div>
+
+        <div class="config-panel">
+            <h3>APR Policy</h3>
+            <div class="form-row">
+                <input id="policyTargetLabel" placeholder="select device or fleet" readonly>
+                <select id="policyQos">
+                    <option value="0">QoS 0</option>
+                    <option value="1">QoS 1</option>
+                    <option value="2">QoS 2</option>
+                </select>
+                <select id="policyCompression">
+                    <option value="none">compression: none</option>
+                    <option value="gzip">compression: gzip</option>
+                    <option value="zlib">compression: zlib</option>
+                    <option value="bz2">compression: bz2</option>
+                </select>
+                <select id="policyEncryption">
+                    <option value="none">encryption: none</option>
+                    <option value="AES-GCM">encryption: AES-GCM</option>
+                    <option value="ChaCha20-Poly1305">encryption: ChaCha20-Poly1305</option>
+                </select>
+                <select id="policyIntegrity">
+                    <option value="none">integrity: none</option>
+                    <option value="sha256">integrity: sha256</option>
+                </select>
+            </div>
+            <div class="button-row">
+                <button type="button" onclick="applyPolicyToDevice()">Apply to Device</button>
+                <button type="button" onclick="applyPolicyToFleet()">Apply to Fleet</button>
+                <button type="button" onclick="clearPolicyForm()">Policy Clear</button>
+            </div>
+            <div id="policyStatus" class="policy-status-box">No policy target selected.</div>
         </div>
 
         <div class="table-panel compact-table">
@@ -121,9 +174,11 @@
                         <th>Device ID</th>
                         <th>Name</th>
                         <th>Type</th>
+                        <th>OS</th>
                         <th>Fleet</th>
                         <th>Owner</th>
                         <th>Status</th>
+                        <th>Policy</th>
                         <th>Telemetry Topic</th>
                         <th>Policy Topic</th>
                     </tr>

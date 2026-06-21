@@ -16,6 +16,6 @@ RUN pip install --upgrade pip \
 
 COPY . .
 
-EXPOSE 5000
+EXPOSE 4728
 
 CMD ["python", "server.py"]

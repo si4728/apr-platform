@@ -20,5 +20,5 @@ docker compose up -d --build
 docker ps --filter "name=iot-dashboard"
 
 Write-Host ""
-Write-Host "Dashboard: http://localhost:5000"
+Write-Host "Dashboard: http://localhost:4728"
 Write-Host "Logs:      docker logs -f iot-dashboard"

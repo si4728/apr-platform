@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
+from sensor_registry import find_sensor_by_topic
 
 CONFIG_FILE = "config.json"
 
@@ -267,12 +268,11 @@ try:
         except Exception:
             pass
             
-        # Match topic to get configured sensor policy
+        # Match topic to get configured sensor policy from the DB registry.
         sensor_policy = "none"
-        for s in config.get("sensors", []):
-            if s.get("topic") == TOPIC:
-                sensor_policy = s.get("policy", "none")
-                break
+        configured_sensor = find_sensor_by_topic(TOPIC)
+        if configured_sensor:
+            sensor_policy = configured_sensor.get("policy", "none")
                 
         payload_text, qos = generate_random_payload(sensor_policy)
 

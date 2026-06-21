@@ -246,6 +246,11 @@ button:hover {
     color: #166534;
 }
 
+.status-pending {
+    background: #fef3c7;
+    color: #92400e;
+}
+
 .status-suspended {
     background: #fee2e2;
     color: #991b1b;
@@ -311,11 +316,114 @@ button:hover {
     margin-top: 16px;
 }
 
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #6b7280;
+    font-size: 12px;
+    margin: 16px 0;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: #e5e7eb;
+}
+
+.auth-secondary-button {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    border: 1px solid #2563eb;
+    color: #1d4ed8;
+    background: #eff6ff;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-weight: 800;
+}
+
+.auth-secondary-button:hover {
+    background: #dbeafe;
+}
+
 .admin-form-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 10px;
     align-items: end;
+}
+
+.inline-reset-form {
+    display: flex;
+    gap: 6px;
+    min-width: 220px;
+    align-items: center;
+}
+
+.inline-reset-form input {
+    min-width: 130px;
+}
+
+.selected-user-panel {
+    display: grid;
+    grid-template-columns: 120px minmax(240px, 1fr) 150px minmax(180px, 1fr) auto auto auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.selected-table-row {
+    outline: 2px solid #2563eb;
+    outline-offset: -2px;
+    background: #eff6ff;
+}
+
+.form-block {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #e5e7eb;
+}
+
+.check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    font-weight: 700;
+    color: #374151;
+}
+
+.tree-panel {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 12px;
+    background: #f9fafb;
+}
+
+.tree-site {
+    padding: 10px 0;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.tree-site:last-child {
+    border-bottom: 0;
+}
+
+.tree-site ul {
+    margin: 8px 0 0 18px;
+    padding: 0;
+}
+
+.tree-site li {
+    margin: 6px 0;
+}
+
+.tree-node {
+    font-weight: 800;
+    color: #111827;
 }
 
 .main-header {
@@ -328,6 +436,66 @@ button:hover {
 
 .main-header h2 {
     margin: 0 0 6px 0;
+}
+
+.dashboard-display-settings {
+    background: #fff;
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 18px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.dashboard-display-settings-heading h3 {
+    margin: 0 0 12px;
+    font-size: 18px;
+}
+
+.dashboard-display-settings .control-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    align-items: end;
+}
+
+.dashboard-display-settings .control-panel label:first-child {
+    grid-column: span 2;
+}
+
+.dashboard-display-settings .control-panel label {
+    color: #374151;
+    font-weight: 700;
+}
+
+.dashboard-display-settings .control-panel select {
+    min-height: 40px;
+}
+
+.dashboard-sensor-list {
+    background: #fff;
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 18px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.dashboard-sensor-list-heading h3 {
+    margin: 0 0 12px;
+    font-size: 18px;
+}
+
+.dashboard-sensor-list #sensorList {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+}
+
+.dashboard-sensor-list #sensorList > div {
+    margin: 0;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 10px;
+    background: #f9fafb;
 }
 
 .single-chart-panel, .config-panel, .table-panel, .dashboard-section {
@@ -410,6 +578,29 @@ button:hover {
 
 .danger-button:hover {
     background: #b91c1c;
+}
+
+.policy-status-box {
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    background: #f9fafb;
+    color: #374151;
+}
+
+.policy-status-box.policy-ok {
+    background: #f0fdf4;
+    color: #166534;
+    border-color: #bbf7d0;
+}
+
+.policy-status-box.policy-error {
+    background: #fef2f2;
+    color: #991b1b;
+    border-color: #fecaca;
 }
 
 .summary-cards {
@@ -577,5 +768,8 @@ th {
     }
     .form-row {
         flex-direction: column;
+    }
+    .dashboard-display-settings .control-panel {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }

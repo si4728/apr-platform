@@ -13,7 +13,7 @@
 
     <script src="/static/js/common_menu.js"></script>
 
-    <script src="/static/js/sensor_config.js?v=2"
+    <script src="/static/js/sensor_config.js?v=4"
             defer>
     </script>
 
@@ -153,6 +153,19 @@
                        placeholder="topic"
                        readonly>
 
+                <select id="sensorSource"
+                        title="sensor definition source"
+                        style="flex: 1;">
+                    <option value="USER" selected>USER / real device</option>
+                    <option value="SIMULATOR">SIMULATOR / generated</option>
+                </select>
+
+                <select id="sensorOwnerUser"
+                        title="sensor owner user"
+                        style="flex: 1;">
+                    <option value="">owner user</option>
+                </select>
+
                 <select id="payloadSchemaMode"
                         title="payload schema mode"
                         style="flex: 1;">
@@ -264,6 +277,16 @@
         <!-- TABLE -->
         <div class="table-panel">
 
+            <div class="form-row" style="margin-bottom:15px;">
+                <select id="sensorSourceFilter"
+                        title="sensor source filter"
+                        style="max-width:280px;">
+                    <option value="">All sensor definitions</option>
+                    <option value="SIMULATOR">SIMULATOR only</option>
+                    <option value="USER">USER real-device only</option>
+                </select>
+            </div>
+
             <table>
 
                 <thead>
@@ -274,6 +297,8 @@
                     <th>Type</th>
                     <th>Unit</th>
                     <th>Topic</th>
+                    <th>Source</th>
+                    <th>Owner</th>
                     <th>Schema Mode</th>
                     <th>Policy</th>
                     <th>Range</th>
