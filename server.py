@@ -63,7 +63,42 @@ apr_auto_last_evaluation_at = {}
 apr_auto_evaluation_inflight = set()
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-before-production")
+
+DEFAULT_FLASK_SECRET_KEY = "change-this-secret-before-production"
+DEFAULT_ADMIN_PASSWORD = "admin1234"
+DEFAULT_USER_PASSWORD = "user1234"
+DEFAULT_APR_AES_KEY_HEX = "01010101010101010101010101010101"
+INSECURE_FLASK_SECRET_KEYS = {
+    "",
+    "change-this-secret-before-production",
+    "change-this-secret-before-certification",
+    "CHANGE_ME_32_CHAR_FLASK_SECRET_FOR_CERT",
+}
+INSECURE_PASSWORDS = {
+    "",
+    "admin",
+    "password",
+    "admin1234",
+    "user1234",
+    "CHANGE_ME_ADMIN_PASSWORD",
+    "CHANGE_ME_USER_PASSWORD",
+}
+INSECURE_APR_AES_KEYS = {
+    "",
+    DEFAULT_APR_AES_KEY_HEX,
+    "CHANGE_ME_32_HEX_CHAR_AES_KEY_NO_QUOTES",
+}
+
+
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+CERTIFICATION_MODE = env_bool("CERTIFICATION_MODE", False)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", DEFAULT_FLASK_SECRET_KEY)
 
 DB_NAME = os.environ.get("DB_NAME", "iot_data.db")
 DB_JOURNAL_MODE = os.environ.get("DB_JOURNAL_MODE", "WAL").upper()
@@ -112,6 +147,40 @@ DEFINED_SENSOR_REQUIRED_FIELDS = {
     "value",
     "unit",
 }
+
+
+
+def get_apr_aes_key_hex():
+    return os.environ.get("APR_AES_KEY_HEX", DEFAULT_APR_AES_KEY_HEX).strip()
+
+
+def validate_apr_aes_key_hex(value):
+    if not re.fullmatch(r"[0-9a-fA-F]{32}|[0-9a-fA-F]{48}|[0-9a-fA-F]{64}", value or ""):
+        return False
+    return True
+
+
+def validate_certification_runtime_config():
+    if not CERTIFICATION_MODE:
+        return
+
+    errors = []
+    flask_secret = os.environ.get("FLASK_SECRET_KEY", "")
+    admin_password = os.environ.get("IOT_ADMIN_PASSWORD", "")
+    user_password = os.environ.get("IOT_USER_PASSWORD", "")
+    apr_aes_key_hex = get_apr_aes_key_hex()
+
+    if flask_secret.strip() in INSECURE_FLASK_SECRET_KEYS or len(flask_secret.strip()) < 24:
+        errors.append("FLASK_SECRET_KEY must be set to a non-default value with at least 24 characters.")
+    if admin_password.strip() in INSECURE_PASSWORDS or len(admin_password.strip()) < 8:
+        errors.append("IOT_ADMIN_PASSWORD must be set to a non-default value with at least 8 characters.")
+    if user_password.strip() in INSECURE_PASSWORDS or len(user_password.strip()) < 8:
+        errors.append("IOT_USER_PASSWORD must be set to a non-default value with at least 8 characters.")
+    if apr_aes_key_hex in INSECURE_APR_AES_KEYS or not validate_apr_aes_key_hex(apr_aes_key_hex):
+        errors.append("APR_AES_KEY_HEX must be a non-default 128/192/256-bit hex key.")
+
+    if errors:
+        raise RuntimeError("Certification runtime configuration is invalid: " + " | ".join(errors))
 
 
 def now_iso():
@@ -1659,9 +1728,9 @@ def init_db():
     cur.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
         admin_email = os.environ.get("IOT_ADMIN_EMAIL", "admin@example.com")
-        admin_password = os.environ.get("IOT_ADMIN_PASSWORD", "admin1234")
+        admin_password = os.environ.get("IOT_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
         user_email = os.environ.get("IOT_USER_EMAIL", "user@example.com")
-        user_password = os.environ.get("IOT_USER_PASSWORD", "user1234")
+        user_password = os.environ.get("IOT_USER_PASSWORD", DEFAULT_USER_PASSWORD)
         created_at = now_iso()
         cur.execute("""
             INSERT INTO users
@@ -3892,7 +3961,7 @@ interval = 1.0
 experiment_id = RASPI_RUNTIME
 
 [security]
-apr_aes_key_hex = 01010101010101010101010101010101
+apr_aes_key_hex = {get_apr_aes_key_hex()}
 """
 
 
@@ -3923,7 +3992,7 @@ experiment_id = RASPI_SYSTEM_RUNTIME
 metrics = cpu_percent,memory_percent,cpu_temp_c,disk_percent,load_1m
 
 [security]
-apr_aes_key_hex = 01010101010101010101010101010101
+apr_aes_key_hex = {get_apr_aes_key_hex()}
 """
 
 
@@ -5925,6 +5994,7 @@ def api_voice_results():
 
 
 if __name__ == "__main__":
+    validate_certification_runtime_config()
     app_port = DEFAULT_APP_PORT
     assert_port_available(app_port)
     db_health = check_db_file_health()
