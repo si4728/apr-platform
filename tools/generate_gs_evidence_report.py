@@ -37,6 +37,7 @@ REQUIRED_RUNTIME_FILES = [
     "tools/check_certification_config.py",
     "tools/run_apr_model_automation.py",
     "tools/build_gs_submission_package.py",
+    "tools/generate_gs_e2e_preflight_report.py",
 ]
 
 SECRET_KEYS = {
