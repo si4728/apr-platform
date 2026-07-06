@@ -1,0 +1,54 @@
+services:
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: apr-cert-mqtt
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - apr-cert-mosquitto-data:/mosquitto/data
+      - apr-cert-mosquitto-log:/mosquitto/log
+    restart: "no"
+
+  iot-dashboard:
+    build: .
+    container_name: apr-cert-dashboard
+    working_dir: /app
+    depends_on:
+      - mqtt-broker
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+      CERTIFICATION_MODE: ${CERTIFICATION_MODE:-true}
+      DB_NAME: ${DB_NAME:-/app/data/iot_data.db}
+      DB_JOURNAL_MODE: ${DB_JOURNAL_MODE:-WAL}
+      DB_LOCK_RETRIES: ${DB_LOCK_RETRIES:-10}
+      DB_BUSY_TIMEOUT_MS: ${DB_BUSY_TIMEOUT_MS:-30000}
+      SYSTEM_MODE: ${SYSTEM_MODE:-docker-cert}
+      SYSTEM_LOCK_FILE: ${SYSTEM_LOCK_FILE:-/app/runtime/iot_dashboard.lock}
+      SYSTEM_LOCK_STALE_SECONDS: ${SYSTEM_LOCK_STALE_SECONDS:-30}
+      PORT: ${PORT:-4728}
+      IOT_ADMIN_EMAIL: ${IOT_ADMIN_EMAIL:-admin@example.com}
+      IOT_ADMIN_PASSWORD: ${IOT_ADMIN_PASSWORD:-admin1234}
+      IOT_USER_EMAIL: ${IOT_USER_EMAIL:-user@example.com}
+      IOT_USER_PASSWORD: ${IOT_USER_PASSWORD:-user1234}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:-change-this-secret-before-certification}
+      APR_AES_KEY_HEX: ${APR_AES_KEY_HEX:-01010101010101010101010101010101}
+    ports:
+      - "${PORT:-4728}:${PORT:-4728}"
+    volumes:
+      - apr-cert-db:/app/data
+      - apr-cert-runtime:/app/runtime
+      - ./config.example.json:/app/config.json:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/' % os.environ.get('PORT', '4728'), timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    restart: "no"
+
+volumes:
+  apr-cert-db:
+  apr-cert-runtime:
+  apr-cert-mosquitto-data:
+  apr-cert-mosquitto-log:
