@@ -38,7 +38,8 @@
 |---|---|---|
 | [ ] | `docs/GS_CERTIFICATION_SCOPE_V1.md` | 인증 범위 정의 |
 | [ ] | `docs/GS_PRODUCT_DESCRIPTION_KO.md` | 제품설명서 초안 |
-| [ ] | `docs/USER_MANUAL_KO.md` | 사용자취급설명서 |
+| [ ] | `docs/USER_MANUAL_KO.md` | 기존 사용자취급설명서 |
+| [ ] | `docs/GS_USER_OPERATION_MANUAL_KO.md` | GS 제출용 사용자취급설명서 정식본 |
 | [ ] | `docs/GS_DOCKER_INSTALLATION_GUIDE.md` | Docker 설치/운영 가이드 |
 | [ ] | `docs/GS_RELEASE_PACKAGE_STRUCTURE.md` | 제출 패키지 구조 |
 | [ ] | `docs/GS_SECURITY_CONFIGURATION_GUIDE.md` | 보안 설정 가이드 |
@@ -114,6 +115,7 @@ apr-edgeinsight-gs-submission/
     GS_CERTIFICATION_SCOPE_V1.md
     GS_PRODUCT_DESCRIPTION_KO.md
     USER_MANUAL_KO.md
+    GS_USER_OPERATION_MANUAL_KO.md
     GS_INTEGRATED_TEST_CASES.md
     GS_SUBMISSION_PACKAGE_CHECKLIST.md
     GS_DOCKER_INSTALLATION_GUIDE.md
