@@ -29,6 +29,7 @@
 | [ ] | `tools/check_certification_config.py` | 보안 설정 검증 |
 | [ ] | `tools/run_apr_model_automation.py` | APR 모델 자동화 증적 |
 | [ ] | `tools/generate_gs_evidence_report.py` | 통합 증적 리포트 생성 |
+| [ ] | `tools/build_gs_submission_package.py` | GS 제출 패키지 자동 구성 |
 
 ## 3. 필수 문서 체크리스트
 
@@ -46,6 +47,7 @@
 | [ ] | `docs/GS_INTEGRATED_TEST_CASES.md` | 통합 테스트 케이스 |
 | [ ] | `docs/GS_INTEGRATED_EVIDENCE_REPORT_GUIDE.md` | 통합 증적 리포트 가이드 |
 | [ ] | `docs/GS_SUBMISSION_PACKAGE_CHECKLIST.md` | 제출 패키지 체크리스트 |
+| [ ] | `docs/GS_SUBMISSION_PACKAGE_BUILD_GUIDE.md` | 제출 패키지 자동 구성 가이드 |
 
 ## 4. 제출 전 실행 검증 체크리스트
 
@@ -56,6 +58,7 @@
 | [ ] | Python 문법 검증 | `python -m py_compile server.py tools/check_certification_config.py tools/run_apr_model_automation.py tools/generate_gs_evidence_report.py` |
 | [ ] | APR 모델 자동화 검증 | `python tools/run_apr_model_automation.py --skip-export` |
 | [ ] | 통합 증적 리포트 생성 | `python tools/generate_gs_evidence_report.py --env-file .env.cert --skip-apr-export` |
+| [ ] | 제출 패키지 자동 구성 | `python tools/build_gs_submission_package.py --clean --include-evidence --zip` |
 | [ ] | Docker 서버 실행 | `docker compose -f docker-compose.cert.yml --env-file .env.cert up -d --build` |
 | [ ] | Dashboard 접속 | `http://localhost:4728` |
 | [ ] | Client package 다운로드 | 장비 등록 후 PC/Raspberry Pi/Ubuntu package 생성 |

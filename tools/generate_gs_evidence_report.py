@@ -36,6 +36,7 @@ REQUIRED_RUNTIME_FILES = [
     "server.py",
     "tools/check_certification_config.py",
     "tools/run_apr_model_automation.py",
+    "tools/build_gs_submission_package.py",
 ]
 
 SECRET_KEYS = {
