@@ -51,6 +51,7 @@ DOCUMENTS = [
     "docs/GS_SUBMISSION_PACKAGE_BUILD_GUIDE.md",
     "docs/GS_E2E_PREFLIGHT_GUIDE.md",
     "docs/GS_READINESS_REVIEW_GUIDE.md",
+    "docs/GS_LIVE_E2E_GUIDE.md",
 ]
 
 EVIDENCE_FILES = [
@@ -61,6 +62,8 @@ EVIDENCE_FILES = [
     "runtime/gs_certification_evidence/gs_e2e_preflight_report.md",
     "runtime/gs_certification_evidence/gs_readiness_review.json",
     "runtime/gs_certification_evidence/gs_readiness_review.md",
+    "runtime/gs_certification_evidence/gs_live_e2e_report.json",
+    "runtime/gs_certification_evidence/gs_live_e2e_report.md",
 ]
 
 EXCLUDE_NAMES = {

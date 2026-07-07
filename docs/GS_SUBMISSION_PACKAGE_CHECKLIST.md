@@ -32,6 +32,7 @@
 | [ ] | `tools/build_gs_submission_package.py` | GS 제출 패키지 자동 구성 |
 | [ ] | `tools/generate_gs_e2e_preflight_report.py` | GS E2E 사전 점검 리포트 생성 |
 | [ ] | `tools/generate_gs_readiness_review.py` | GS 제출 전 최종 적합성 점검 리포트 생성 |
+| [ ] | `tools/generate_gs_live_e2e_report.py` | GS Docker Live E2E 증적 생성 |
 
 ## 3. 필수 문서 체크리스트
 
@@ -53,6 +54,7 @@
 | [ ] | `docs/GS_SUBMISSION_PACKAGE_BUILD_GUIDE.md` | 제출 패키지 자동 구성 가이드 |
 | [ ] | `docs/GS_E2E_PREFLIGHT_GUIDE.md` | E2E 사전 점검 가이드 |
 | [ ] | `docs/GS_READINESS_REVIEW_GUIDE.md` | 제출 전 최종 적합성 점검 가이드 |
+| [ ] | `docs/GS_LIVE_E2E_GUIDE.md` | Docker Live E2E 증적 생성 가이드 |
 
 ## 4. 제출 전 실행 검증 체크리스트
 
@@ -65,6 +67,7 @@
 | [ ] | 통합 증적 리포트 생성 | `python tools/generate_gs_evidence_report.py --env-file .env.cert --skip-apr-export` |
 | [ ] | E2E 사전 점검 리포트 생성 | `python tools/generate_gs_e2e_preflight_report.py` |
 | [ ] | 제출 전 최종 적합성 점검 | `python tools/generate_gs_readiness_review.py` |
+| [ ] | Docker Live E2E 증적 생성 | `python tools/generate_gs_live_e2e_report.py` |
 | [ ] | 제출 패키지 자동 구성 | `python tools/build_gs_submission_package.py --clean --include-evidence --zip` |
 | [ ] | Docker 서버 실행 | `docker compose -f docker-compose.cert.yml --env-file .env.cert up -d --build` |
 | [ ] | Dashboard 접속 | `http://localhost:4728` |
