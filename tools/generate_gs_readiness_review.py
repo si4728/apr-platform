@@ -11,6 +11,7 @@ OUTPUT_MD = PROJECT_ROOT / "runtime" / "gs_certification_evidence" / "gs_readine
 CORE_DOCUMENTS = [
     "docs/GS_CERTIFICATION_SCOPE_V1.md",
     "docs/GS_PRODUCT_DESCRIPTION_KO.md",
+    "docs/GS_APPLICATION_SUMMARY_KO.md",
     "docs/GS_USER_OPERATION_MANUAL_KO.md",
     "docs/GS_INTEGRATED_TEST_CASES.md",
     "docs/GS_SUBMISSION_PACKAGE_CHECKLIST.md",
